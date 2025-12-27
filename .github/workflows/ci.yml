@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - run: cargo check --target thumbv7m-none-eabi
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: thumbv7m-none-eabi
+      - run: cargo clippy --target thumbv7m-none-eabi -- -D warnings
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  build:
+    name: Build (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "rtt"
+          - "async-await"
+          - "ecc-64bit"
+          - "rtt,async-await"
+          - "rtt,ecc-64bit"
+          - "async-await,ecc-64bit"
+          - "rtt,async-await,ecc-64bit"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - name: Build
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo build --target thumbv7m-none-eabi --no-default-features
+          else
+            cargo build --target thumbv7m-none-eabi --no-default-features --features "${{ matrix.features }}"
+          fi
+
+  build-default:
+    name: Build (default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - run: cargo build --target thumbv7m-none-eabi
