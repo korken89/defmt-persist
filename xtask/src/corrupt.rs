@@ -38,11 +38,9 @@ impl CorruptFlags {
         }
     }
 
-    /// Returns true if corruption should cause buffer reinitialization.
-    fn causes_reinit(&self) -> bool {
-        // Header corruption always causes reinit
-        // Index corruption only resets the invalid index(es), not full reinit
-        self.header
+    /// Returns true if any corruption is present.
+    fn any(&self) -> bool {
+        self.header || self.read || self.write
     }
 
     /// A list of all combinations.
@@ -94,15 +92,17 @@ impl CorruptFlags {
 
 /// Apply corruption to a snapshot based on flags.
 ///
-/// Layout (32-bit, no ECC padding):
+/// Layout (32-bit with ECC padding):
 /// - bytes 0-15: header (u128 magic)
 /// - bytes 16-19: read index (usize)
-/// - bytes 20-23: write index (usize)
+/// - bytes 20-23: _pad_read
+/// - bytes 24-27: write index (usize)
+/// - bytes 28-31: _pad_write
 fn apply_corruption(snapshot: &[u8], flags: CorruptFlags) -> Vec<u8> {
     let mut corrupted = snapshot.to_vec();
 
     if flags.header {
-        // Zero the a magic byte.
+        // Zero a magic byte.
         corrupted[0] = 0;
     }
 
@@ -113,7 +113,7 @@ fn apply_corruption(snapshot: &[u8], flags: CorruptFlags) -> Vec<u8> {
 
     if flags.write {
         // Set write index to invalid value.
-        corrupted[23] = 0xff;
+        corrupted[27] = 0xff;
     }
 
     corrupted
@@ -168,38 +168,43 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
                 addr: PERSIST_ADDR,
             }),
         )?;
+        let result_semihosting = defmt::decode_output(elf_path, &result.semihosting)?;
         let result_uart0 = defmt::decode_output(elf_path, &result.uart0)?;
 
         if opts.verbose {
-            let result_semihosting = defmt::decode_output(elf_path, &result.semihosting)?;
             println!("    --- semihosting ---");
             print!("{result_semihosting}");
             println!("    --- uart ---");
             print!("{result_uart0}");
         }
 
-        // Check expected behavior
-        let passed = if flags.causes_reinit() {
-            // Header corruption: should reinitialize (same output as fresh)
-            if result_uart0 == phase1_uart0 {
+        // Check expected behavior using semihosting output:
+        // - No corruption: recovery path taken, semihosting empty (no defmt::info!() called)
+        // - Any corruption: fresh path taken, semihosting has "fresh buffer" message
+        let passed = if flags.any() {
+            // Any corruption should result in fresh path (semihosting has output)
+            if !result_semihosting.is_empty() && result_uart0 == phase1_uart0 {
                 println!("    PASS: buffer reinitialized");
                 true
             } else {
-                println!("    FAIL: expected reinit, got different output");
-                println!("    --- expected (fresh) ---");
-                print!("{phase1_uart0}");
-                println!("    --- got ---");
+                println!("    FAIL: expected fresh path");
+                println!("    --- semihosting ---");
+                print!("{result_semihosting}");
+                println!("    --- uart ---");
                 print!("{result_uart0}");
                 false
             }
         } else {
-            // No header corruption: should recover data (or reset indices)
-            // For simplicity, we just verify it doesn't crash and produces output.
-            if !result_uart0.is_empty() {
-                println!("    PASS: produced output");
+            // No corruption: recovery path taken (semihosting empty, UART has recovered data)
+            if result_semihosting.is_empty() && !result_uart0.is_empty() {
+                println!("    PASS: recovered data");
                 true
             } else {
-                println!("    FAIL: no output produced");
+                println!("    FAIL: expected recovery path");
+                println!("    --- semihosting ---");
+                print!("{result_semihosting}");
+                println!("    --- uart ---");
+                print!("{result_uart0}");
                 false
             }
         };
