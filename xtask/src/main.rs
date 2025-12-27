@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -21,6 +22,16 @@ enum Commands {
         /// Run in release mode
         #[arg(long)]
         release: bool,
+    },
+
+    /// Run all tests and compare output against expected
+    Test {
+        /// Only run a specific test
+        filter: Option<String>,
+
+        /// Update expected output files instead of comparing
+        #[arg(long)]
+        bless: bool,
     },
 }
 
@@ -72,9 +83,9 @@ fn build_example(example: &str, release: bool) -> Result<PathBuf> {
     Ok(elf_path)
 }
 
-fn run_qemu(elf_path: &PathBuf) -> Result<()> {
-    let status = Command::new("qemu-system-arm")
-        .arg("-cpu")
+fn run_qemu(elf_path: &PathBuf, capture: bool) -> Result<String> {
+    let mut cmd = Command::new("qemu-system-arm");
+    cmd.arg("-cpu")
         .arg("cortex-m3")
         .arg("-machine")
         .arg("lm3s6965evb")
@@ -83,15 +94,87 @@ fn run_qemu(elf_path: &PathBuf) -> Result<()> {
         .arg("enable=on,target=native")
         .arg("-kernel")
         .arg(elf_path)
-        .stdin(Stdio::null())
-        .status()
-        .context("Failed to run QEMU")?;
+        .stdin(Stdio::null());
 
-    if !status.success() {
-        bail!("QEMU exited with error: {:?}", status.code());
+    if capture {
+        let output = cmd
+            .output()
+            .context("Failed to run QEMU")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("QEMU exited with error: {:?}\n{}", output.status.code(), stderr);
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let status = cmd
+            .status()
+            .context("Failed to run QEMU")?;
+
+        if !status.success() {
+            bail!("QEMU exited with error: {:?}", status.code());
+        }
+
+        Ok(String::new())
     }
+}
 
-    Ok(())
+fn discover_examples() -> Result<Vec<String>> {
+    let root = project_root();
+    let examples_dir = root.join("testsuite").join("examples");
+
+    let mut examples = Vec::new();
+    for entry in fs::read_dir(&examples_dir).context("Failed to read examples directory")? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "rs") {
+            if let Some(stem) = path.file_stem() {
+                examples.push(stem.to_string_lossy().into_owned());
+            }
+        }
+    }
+    examples.sort();
+    Ok(examples)
+}
+
+fn run_test(example: &str, bless: bool) -> Result<bool> {
+    let root = project_root();
+    let expected_path = root
+        .join("testsuite")
+        .join("expected")
+        .join(format!("{example}.txt"));
+
+    println!("Building '{example}'...");
+    let elf_path = build_example(example, false)?;
+
+    println!("Running in QEMU...");
+    let output = run_qemu(&elf_path, true)?;
+
+    if bless {
+        fs::create_dir_all(expected_path.parent().unwrap())?;
+        fs::write(&expected_path, &output)?;
+        println!("  Updated {}", expected_path.display());
+        Ok(true)
+    } else if expected_path.exists() {
+        let expected = fs::read_to_string(&expected_path)?;
+        if output == expected {
+            println!("  PASS");
+            Ok(true)
+        } else {
+            println!("  FAIL: output differs from expected");
+            println!("--- expected ---");
+            println!("{expected}");
+            println!("--- actual ---");
+            println!("{output}");
+            Ok(false)
+        }
+    } else {
+        println!("  No expected output file, run with --bless to create");
+        println!("--- output ---");
+        println!("{output}");
+        Ok(false)
+    }
 }
 
 fn main() -> Result<()> {
@@ -102,7 +185,42 @@ fn main() -> Result<()> {
             println!("Building example '{example}'...");
             let elf_path = build_example(&example, release)?;
             println!("Running in QEMU...");
-            run_qemu(&elf_path)?;
+            run_qemu(&elf_path, false)?;
+        }
+
+        Commands::Test { filter, bless } => {
+            let examples = discover_examples()?;
+            let examples: Vec<_> = if let Some(ref f) = filter {
+                examples.into_iter().filter(|e| e.contains(f)).collect()
+            } else {
+                examples
+            };
+
+            if examples.is_empty() {
+                bail!("No tests found");
+            }
+
+            let mut passed = 0;
+            let mut failed = 0;
+
+            for example in &examples {
+                println!("\n=== Test: {example} ===");
+                match run_test(example, bless) {
+                    Ok(true) => passed += 1,
+                    Ok(false) => failed += 1,
+                    Err(e) => {
+                        println!("  ERROR: {e}");
+                        failed += 1;
+                    }
+                }
+            }
+
+            println!("\n=== Summary ===");
+            println!("{passed} passed, {failed} failed");
+
+            if failed > 0 {
+                bail!("{failed} test(s) failed");
+            }
         }
     }
 
