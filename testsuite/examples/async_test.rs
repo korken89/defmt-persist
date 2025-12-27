@@ -46,7 +46,7 @@ where
 
 /// Async task that writes log messages with yields in between.
 async fn writer_task() {
-    // Yield to let reader start waiting
+    // Yield to let reader start waiting.
     yield_once().await;
 
     defmt::info!("async test: message 1");
@@ -61,10 +61,10 @@ async fn writer_task() {
 /// Async task that waits for data and reads it.
 async fn reader_task(consumer: &mut Consumer<'static>) {
     for _ in 0..3 {
-        // Wait for data to be available
+        // Wait for data to be available.
         consumer.wait_for_data().await;
 
-        // Read and output all available data
+        // Read and output all available data.
         loop {
             let data = consumer.read();
             if data.buf().is_empty() {
@@ -94,12 +94,12 @@ async fn yield_once() {
 fn block_on<F: Future>(fut: F) -> F::Output {
     let mut fut = pin!(fut);
 
-    // Create a no-op waker
+    // Create a no-op waker.
     const VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |_| RawWaker::new(core::ptr::null(), &VTABLE), // clone
-        |_| {},                                        // wake
-        |_| {},                                        // wake_by_ref
-        |_| {},                                        // drop
+        |_| RawWaker::new(core::ptr::null(), &VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
     );
     let raw_waker = RawWaker::new(core::ptr::null(), &VTABLE);
     let waker = unsafe { Waker::from_raw(raw_waker) };
@@ -109,8 +109,6 @@ fn block_on<F: Future>(fut: F) -> F::Output {
         match fut.as_mut().poll(&mut cx) {
             Poll::Ready(val) => return val,
             Poll::Pending => {
-                // In a real executor we'd wait for a wakeup,
-                // but for this test we just spin
                 cortex_m::asm::nop();
             }
         }
@@ -123,7 +121,6 @@ fn main() -> ! {
         panic!("defmt-persist already initialized (or failed)");
     };
 
-    // Run writer and reader concurrently
     block_on(join(writer_task(), reader_task(&mut consumer)));
 
     exit_success();

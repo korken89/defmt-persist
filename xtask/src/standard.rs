@@ -38,7 +38,7 @@ pub fn run_standard(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Res
         return Ok(true);
     }
 
-    // Test mode: compare against expected file
+    // Test mode: compare against expected file.
     let root = project_root();
     let expected_path = root
         .join("testsuite")

@@ -123,7 +123,7 @@ fn apply_corruption(snapshot: &[u8], flags: CorruptFlags) -> Vec<u8> {
 ///
 /// Tests all 8 combinations of header/read/write corruption.
 pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
-    // Phase 1: Run normally, capture persist region
+    // Phase 1: Run normally, capture persist region.
     println!("Phase 1: Normal run to capture persist region...");
     let phase1 = run_qemu(elf_path, None)?;
     let phase1_uart0 = defmt::decode_output(elf_path, &phase1.uart0)?;
@@ -149,7 +149,7 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
         );
     }
 
-    // Test all 8 combinations of corruption
+    // Test all 8 combinations of corruption.
     let scenarios = CorruptFlags::all_combinations();
 
     let snapshot_file = NamedTempFile::new().context("Failed to create snapshot file")?;
@@ -179,10 +179,10 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
         }
 
         // Check expected behavior using semihosting output:
-        // - No corruption: recovery path taken, semihosting empty (no defmt::info!() called)
-        // - Any corruption: fresh path taken, semihosting has "fresh buffer" message
+        // - No corruption: recovery path taken, semihosting empty (no defmt::info!() called).
+        // - Any corruption: fresh path taken, semihosting has "fresh buffer" message.
         let passed = if flags.any() {
-            // Any corruption should result in fresh path (semihosting has output)
+            // Any corruption should result in fresh path (semihosting has output).
             if !result_semihosting.is_empty() && result_uart0 == phase1_uart0 {
                 println!("    PASS: buffer reinitialized");
                 true
@@ -195,7 +195,7 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
                 false
             }
         } else {
-            // No corruption: recovery path taken (semihosting empty, UART has recovered data)
+            // No corruption: recovery path taken (semihosting empty, UART has recovered data).
             if result_semihosting.is_empty() && !result_uart0.is_empty() {
                 println!("    PASS: recovered data");
                 true

@@ -18,7 +18,7 @@ pub const PERSIST_ADDR: u32 = 0x2000_FC00;
 /// Phase 1: Write logs and capture persist region via UART1.
 /// Phase 2: Load snapshot and verify recovered logs match.
 pub fn run_persist(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
-    // Phase 1: Write logs and capture persist region
+    // Phase 1: Write logs and capture persist region.
     println!("Phase 1: Writing logs...");
     let phase1 = run_qemu(elf_path, None)?;
     let phase1_semihosting = defmt::decode_output(elf_path, &phase1.semihosting)?;
@@ -44,7 +44,7 @@ pub fn run_persist(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
         );
     }
 
-    // Phase 2: Load snapshot and read recovered logs
+    // Phase 2: Load snapshot and read recovered logs.
     let snapshot_file = NamedTempFile::new().context("Failed to create snapshot file")?;
     fs::write(snapshot_file.path(), &phase1.uart1)?;
 
@@ -67,7 +67,7 @@ pub fn run_persist(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
         println!("--- Phase 2 end ---\n");
     }
 
-    // Compare UART0 outputs
+    // Compare UART0 outputs.
     if phase1_uart0 == phase2_uart0 {
         println!("  PASS: recovered logs match written logs");
         Ok(true)

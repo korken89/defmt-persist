@@ -15,11 +15,11 @@ fn main() -> ! {
         panic!("defmt-persist already initialized (or failed)");
     };
 
-    // Log 1000 messages - this will wrap around the buffer many times
+    // Log 1000 messages - this will wrap around the buffer many times.
     for i in 0..1000u32 {
-        defmt::info!("wraparound test: message {=u32}", i);
+        defmt::info!("wraparound test: message {}", i);
 
-        // Drain the buffer periodically to avoid overflow
+        // Drain the buffer periodically to avoid overflow.
         if i.is_multiple_of(20) {
             loop {
                 let data = consumer.read();
@@ -32,7 +32,7 @@ fn main() -> ! {
         }
     }
 
-    // Drain any remaining messages
+    // Drain any remaining messages.
     loop {
         let data = consumer.read();
         if data.buf().is_empty() {

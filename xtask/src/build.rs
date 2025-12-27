@@ -12,7 +12,7 @@ pub fn project_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().unwrap());
 
-    // If we're in xtask/, go up one level
+    // If we're in xtask/, go up one level.
     if manifest_dir.ends_with("xtask") {
         manifest_dir.parent().unwrap().to_path_buf()
     } else {

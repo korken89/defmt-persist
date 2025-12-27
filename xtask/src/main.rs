@@ -21,26 +21,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run an example in QEMU
+    /// Run an example in QEMU.
     Qemu {
-        /// Name of the example to run
+        /// Name of the example to run.
         example: String,
 
-        /// Run in release mode
+        /// Run in release mode.
         #[arg(long)]
         release: bool,
     },
 
-    /// Run all tests and compare output against expected
+    /// Run all tests and compare output against expected.
     Test {
-        /// Only run a specific test
+        /// Only run a specific test.
         filter: Option<String>,
 
-        /// Update expected output files instead of comparing
+        /// Update expected output files instead of comparing.
         #[arg(long)]
         bless: bool,
 
-        /// Run in release mode
+        /// Run in release mode.
         #[arg(long)]
         release: bool,
     },

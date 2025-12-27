@@ -9,7 +9,7 @@ fn main() -> ! {
         panic!("defmt-persist already initialized (or failed)");
     };
 
-    // Test all log levels
+    // Test all log levels.
     defmt::println!("println: Hello from defmt-persist!");
     defmt::error!("error: This is an error message");
     defmt::warn!("warn: This is a warning message");
@@ -17,7 +17,7 @@ fn main() -> ! {
     defmt::debug!("debug: This is a debug message");
     defmt::trace!("trace: This is a trace message");
 
-    // Send all logs over UART as well
+    // Send all logs over UART as well.
     loop {
         let data = consumer.read();
 
