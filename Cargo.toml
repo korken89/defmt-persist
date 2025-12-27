@@ -1,0 +1,35 @@
+[package]
+name = "defmt-persist"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Persistent defmt logger that survives resets"
+keywords = ["defmt", "logging", "embedded", "no_std"]
+categories = ["embedded", "no-std"]
+
+[dependencies]
+defmt = "1.0.1"
+critical-section = "1.2"
+
+[features]
+default = [
+    "rtt",
+    "async-await",
+    "ecc-64bit",
+    # NOTE(defmt-persist): It is *strongly* recommended to use the rzcobs encoding when
+    # using this crate. If the buffer is ever filled, then the remaining
+    # bytes will be discarded, which will corrupt the message stream.
+    #
+    # Because rzcobs is delimited by zero bytes, it is possible to recover
+    # from this corruption, with the loss of a limited number of messages.
+    # When using the "raw" encoding, you MUST ensure that the buffer is
+    # never overfilled, as it will NOT be possible to recover from this
+    # error condition.
+    "defmt/encoding-rzcobs"
+]
+async-await = [ ]
+rtt = [ ]
+# Adds padding to ensure each atomic field occupies its own 64-bit ECC word.
+# Required for reset-safe persistence on MCUs with 64-bit ECC-protected RAM,
+# such as some STM32 series (e.g., STM32H7, STM32L5).
+ecc-64bit = [ ]
