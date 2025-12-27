@@ -1,3 +1,6 @@
+[workspace]
+members = ["xtask", "testsuite"]
+
 [package]
 name = "defmt-persist"
 version = "0.1.0"
