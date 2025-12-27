@@ -1,5 +1,10 @@
 # defmt-persist
 
+[![CI](https://github.com/korken89/defmt-persist/actions/workflows/ci.yml/badge.svg)](https://github.com/korken89/defmt-persist/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/defmt-persist.svg)](https://crates.io/crates/defmt-persist)
+[![docs.rs](https://docs.rs/defmt-persist/badge.svg)](https://docs.rs/defmt-persist)
+[![License](https://img.shields.io/crates/l/defmt-persist.svg)](LICENSE-MIT)
+
 A persistent `defmt` logger that survives resets.
 
 This crate provides a `defmt::global_logger` that stores logged messages in a
