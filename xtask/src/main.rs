@@ -39,6 +39,10 @@ enum Commands {
         /// Update expected output files instead of comparing
         #[arg(long)]
         bless: bool,
+
+        /// Run in release mode
+        #[arg(long)]
+        release: bool,
     },
 }
 
@@ -55,7 +59,11 @@ fn main() -> Result<()> {
             run_example(&example, &opts)?;
         }
 
-        Commands::Test { filter, bless } => {
+        Commands::Test {
+            filter,
+            bless,
+            release,
+        } => {
             let examples = discover_examples()?;
             let examples: Vec<_> = if let Some(ref f) = filter {
                 examples.into_iter().filter(|e| e.contains(f)).collect()
@@ -70,7 +78,7 @@ fn main() -> Result<()> {
             let opts = RunOptions {
                 verbose: false,
                 bless,
-                release: false,
+                release,
             };
 
             let mut passed = 0;

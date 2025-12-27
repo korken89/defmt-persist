@@ -78,3 +78,27 @@ jobs:
         with:
           targets: thumbv7m-none-eabi
       - run: cargo build --target thumbv7m-none-eabi
+
+  test:
+    name: Test (QEMU, ${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo xtask test --release
+          else
+            cargo xtask test
+          fi

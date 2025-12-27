@@ -1,6 +1,6 @@
-basic.rs:13: [PRINT] println: Hello from defmt-persist!
-basic.rs:14: [ERROR] error: This is an error message
-basic.rs:15: [WARN ] warn: This is a warning message
-basic.rs:16: [INFO ] info: This is an info message
-basic.rs:17: [DEBUG] debug: This is a debug message
-basic.rs:18: [TRACE] trace: This is a trace message
+[PRINT] println: Hello from defmt-persist!
+[ERROR] error: This is an error message
+[WARN ] warn: This is a warning message
+[INFO ] info: This is an info message
+[DEBUG] debug: This is a debug message
+[TRACE] trace: This is a trace message

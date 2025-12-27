@@ -35,25 +35,12 @@ pub fn decode_output(elf_path: &Path, raw_output: &[u8]) -> Result<String> {
     Ok(output)
 }
 
-fn format_frame(frame: &Frame, locs: Option<&Locations>) -> String {
+fn format_frame(frame: &Frame, _locs: Option<&Locations>) -> String {
     let level = frame
         .level()
         .map(|l| l.as_str())
         .unwrap_or("print")
         .to_uppercase();
 
-    let loc = locs.and_then(|locs| locs.get(&frame.index())).map(|loc| {
-        // Extract just the filename, not the full path
-        let filename = loc
-            .file
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| loc.file.display().to_string());
-        format!("{filename}:{}", loc.line)
-    });
-
-    match loc {
-        Some(loc) => format!("{loc}: [{level:<5}] {}", frame.display_message()),
-        None => format!("[{level:<5}] {}", frame.display_message()),
-    }
+    format!("[{level:<5}] {}", frame.display_message())
 }
