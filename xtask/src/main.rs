@@ -38,6 +38,31 @@ enum Commands {
     },
 }
 
+/// Test mode detected from file header
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestMode {
+    /// Standard test: single run, compare output
+    Standard,
+    /// Persistence test: two-phase run with memory snapshot
+    Persist,
+}
+
+/// Detect test mode from file header.
+/// Looks for `@test-mode: <mode>` in the first few lines.
+fn detect_test_mode(example_path: &PathBuf) -> TestMode {
+    if let Ok(content) = fs::read_to_string(example_path) {
+        for line in content.lines().take(10) {
+            if let Some(mode) = line.strip_prefix("//! @test-mode:") {
+                match mode.trim() {
+                    "persist" => return TestMode::Persist,
+                    _ => {}
+                }
+            }
+        }
+    }
+    TestMode::Standard
+}
+
 fn project_root() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -90,16 +115,26 @@ fn build_example(example: &str, release: bool) -> Result<PathBuf> {
 struct QemuOutput {
     /// defmt output from semihosting (stdout)
     semihosting: Vec<u8>,
-    /// UART output
-    uart: Vec<u8>,
+    /// UART0 output (defmt ring buffer content)
+    uart0: Vec<u8>,
+    /// UART1 output (raw persist region dump)
+    uart1: Vec<u8>,
 }
 
-fn run_qemu_raw(elf_path: &PathBuf) -> Result<QemuOutput> {
-    let uart_file = NamedTempFile::new().context("Failed to create temp file for UART")?;
-    let uart_path = uart_file.path();
+/// Optional data to pre-load into memory before running
+struct MemoryLoad<'a> {
+    file: &'a PathBuf,
+    addr: u32,
+}
 
-    let output = Command::new("qemu-system-arm")
-        .arg("-cpu")
+fn run_qemu(elf_path: &PathBuf, memory_load: Option<MemoryLoad>) -> Result<QemuOutput> {
+    let uart0_file = NamedTempFile::new().context("Failed to create temp file for UART0")?;
+    let uart0_path = uart0_file.path();
+    let uart1_file = NamedTempFile::new().context("Failed to create temp file for UART1")?;
+    let uart1_path = uart1_file.path();
+
+    let mut cmd = Command::new("qemu-system-arm");
+    cmd.arg("-cpu")
         .arg("cortex-m3")
         .arg("-machine")
         .arg("lm3s6965evb")
@@ -109,12 +144,22 @@ fn run_qemu_raw(elf_path: &PathBuf) -> Result<QemuOutput> {
         .arg("-semihosting-config")
         .arg("enable=on,target=native")
         .arg("-serial")
-        .arg(format!("file:{}", uart_path.display()))
-        .arg("-kernel")
-        .arg(elf_path)
-        .stdin(Stdio::null())
-        .output()
-        .context("Failed to run QEMU")?;
+        .arg(format!("file:{}", uart0_path.display()))
+        .arg("-serial")
+        .arg(format!("file:{}", uart1_path.display()));
+
+    if let Some(load) = memory_load {
+        cmd.arg("-device").arg(format!(
+            "loader,file={},addr={:#x},force-raw=on",
+            load.file.display(),
+            load.addr
+        ));
+    }
+
+    cmd.arg("-kernel").arg(elf_path);
+    cmd.stdin(Stdio::null());
+
+    let output = cmd.output().context("Failed to run QEMU")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -125,11 +170,13 @@ fn run_qemu_raw(elf_path: &PathBuf) -> Result<QemuOutput> {
         );
     }
 
-    let uart = fs::read(uart_path).unwrap_or_default();
+    let uart0 = fs::read(uart0_path).unwrap_or_default();
+    let uart1 = fs::read(uart1_path).unwrap_or_default();
 
     Ok(QemuOutput {
         semihosting: output.stdout,
-        uart,
+        uart0,
+        uart1,
     })
 }
 
@@ -151,60 +198,167 @@ fn discover_examples() -> Result<Vec<String>> {
     Ok(examples)
 }
 
-fn run_test(example: &str, bless: bool) -> Result<bool> {
+/// Options for running an example
+struct RunOptions {
+    /// Print verbose output (for `qemu` command)
+    verbose: bool,
+    /// Update expected files instead of comparing (for `test --bless`)
+    bless: bool,
+    /// Build in release mode
+    release: bool,
+}
+
+fn run_example(example: &str, opts: &RunOptions) -> Result<bool> {
+    let root = project_root();
+    let example_path = root
+        .join("testsuite")
+        .join("examples")
+        .join(format!("{example}.rs"));
+    let test_mode = detect_test_mode(&example_path);
+
+    println!("Building '{example}'...");
+    let elf_path = build_example(example, opts.release)?;
+
+    match test_mode {
+        TestMode::Standard => run_standard(example, &elf_path, opts),
+        TestMode::Persist => run_persist(&elf_path, opts),
+    }
+}
+
+fn run_standard(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
+    println!("Running in QEMU...");
+    let output = run_qemu(elf_path, None)?;
+    let semihosting = defmt::decode_output(elf_path, &output.semihosting)?;
+    let uart0 = defmt::decode_output(elf_path, &output.uart0)?;
+
+    if opts.verbose {
+        print!("{semihosting}");
+        println!("--- QEMU run end ---");
+
+        if !output.uart0.is_empty() {
+            if semihosting != uart0 {
+                println!("ERROR: Semihosting and UART output differs");
+                println!("--- semihosting ---");
+                print!("{semihosting}");
+                println!("--- uart ---");
+                print!("{uart0}");
+                return Ok(false);
+            } else {
+                println!("PASS: Semihosting and UART output is equal");
+            }
+        }
+        return Ok(true);
+    }
+
+    // Test mode: compare against expected file
     let root = project_root();
     let expected_path = root
         .join("testsuite")
         .join("expected")
         .join(format!("{example}.expected"));
 
-    println!("Building '{example}'...");
-    let elf_path = build_example(example, false)?;
-
-    println!("Running in QEMU...");
-    let qemu_output = run_qemu_raw(&elf_path)?;
-    let output_semihosting = defmt::decode_output(&elf_path, &qemu_output.semihosting)?;
-    let output_uart = defmt::decode_output(&elf_path, &qemu_output.uart)?;
-
-    if bless {
+    if opts.bless {
         let filename = expected_path.file_name().unwrap().to_string_lossy();
         let status = if expected_path.exists() {
             let existing = fs::read_to_string(&expected_path)?;
-            if existing == output_semihosting {
+            if existing == semihosting {
                 "No change"
             } else {
-                fs::write(&expected_path, &output_semihosting)?;
+                fs::write(&expected_path, &semihosting)?;
                 "Updated"
             }
         } else {
             fs::create_dir_all(expected_path.parent().unwrap())?;
-            fs::write(&expected_path, &output_semihosting)?;
+            fs::write(&expected_path, &semihosting)?;
             "Created"
         };
-        println!("  {filename}: {status} ");
+        println!("  {filename}: {status}");
         Ok(true)
     } else if expected_path.exists() {
         let expected = fs::read_to_string(&expected_path)?;
-        if output_semihosting == expected && output_uart == expected {
+        if semihosting == expected && uart0 == expected {
             println!("  PASS");
-
             Ok(true)
         } else {
             println!("  FAIL: output differs from expected");
             println!("--- expected ---");
-            println!("{expected}");
-            println!("--- actual (semihosting) ---");
-            println!("{output_semihosting}");
-            println!("--- actual (uart) ---");
-            println!("{output_uart}");
-
+            print!("{expected}");
+            println!("--- semihosting ---");
+            print!("{semihosting}");
+            println!("--- uart ---");
+            print!("{uart0}");
             Ok(false)
         }
     } else {
         println!("  No expected output file, run with --bless to create");
         println!("--- output ---");
-        println!("{output_semihosting}");
+        print!("{semihosting}");
+        Ok(false)
+    }
+}
 
+const PERSIST_ADDR: u32 = 0x2000_FC00;
+
+fn run_persist(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
+    // Phase 1: Write logs and capture persist region
+    println!("Phase 1: Writing logs...");
+    let phase1 = run_qemu(elf_path, None)?;
+    let phase1_semihosting = defmt::decode_output(elf_path, &phase1.semihosting)?;
+    let phase1_uart0 = defmt::decode_output(elf_path, &phase1.uart0)?;
+
+    if opts.verbose {
+        println!("--- semihosting ---");
+        print!("{phase1_semihosting}");
+        println!("--- uart ---");
+        print!("{phase1_uart0}");
+        println!("--- Phase 1 end ---");
+    }
+
+    if phase1.uart1.is_empty() {
+        println!("  FAIL: no persist region captured in phase 1");
+        return Ok(false);
+    }
+
+    if opts.verbose {
+        println!(
+            "Captured {} bytes from persist region\n",
+            phase1.uart1.len()
+        );
+    }
+
+    // Phase 2: Load snapshot and read recovered logs
+    let snapshot_file = NamedTempFile::new().context("Failed to create snapshot file")?;
+    fs::write(snapshot_file.path(), &phase1.uart1)?;
+
+    println!("Phase 2: Reading recovered logs...");
+    let phase2 = run_qemu(
+        elf_path,
+        Some(MemoryLoad {
+            file: &snapshot_file.path().to_path_buf(),
+            addr: PERSIST_ADDR,
+        }),
+    )?;
+    let phase2_semihosting = defmt::decode_output(elf_path, &phase2.semihosting)?;
+    let phase2_uart0 = defmt::decode_output(elf_path, &phase2.uart0)?;
+
+    if opts.verbose {
+        println!("--- semihosting ---");
+        print!("{phase2_semihosting}");
+        println!("--- uart ---");
+        print!("{phase2_uart0}");
+        println!("--- Phase 2 end ---\n");
+    }
+
+    // Compare UART0 outputs
+    if phase1_uart0 == phase2_uart0 {
+        println!("  PASS: recovered logs match written logs");
+        Ok(true)
+    } else {
+        println!("  FAIL: recovered logs don't match");
+        println!("--- phase 1 (written) ---");
+        print!("{phase1_uart0}");
+        println!("--- phase 2 (recovered) ---");
+        print!("{phase2_uart0}");
         Ok(false)
     }
 }
@@ -214,29 +368,12 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Qemu { example, release } => {
-            println!("Building example '{example}'...");
-            let elf_path = build_example(&example, release)?;
-            println!("Running in QEMU...");
-            let qemu_output = run_qemu_raw(&elf_path)?;
-
-            // Print defmt output (decoded from semihosting)
-            let output_semihosting = defmt::decode_output(&elf_path, &qemu_output.semihosting)?;
-            let output_uart = defmt::decode_output(&elf_path, &qemu_output.uart)?;
-            print!("{output_semihosting}");
-            println!("--- QEMU run end ---");
-
-            // Print UART output if any
-            if !qemu_output.uart.is_empty() {
-                if output_semihosting != output_uart {
-                    println!("ERROR: Semihosting and UART output differs");
-                    println!("--- actual (semihosting) ---");
-                    println!("{output_semihosting}");
-                    println!("--- actual (uart) ---");
-                    println!("{output_uart}");
-                } else {
-                    println!("PASS: Semihosting and UART output is equal");
-                }
-            }
+            let opts = RunOptions {
+                verbose: true,
+                bless: false,
+                release,
+            };
+            run_example(&example, &opts)?;
         }
 
         Commands::Test { filter, bless } => {
@@ -251,12 +388,18 @@ fn main() -> Result<()> {
                 bail!("No tests found");
             }
 
+            let opts = RunOptions {
+                verbose: false,
+                bless,
+                release: false,
+            };
+
             let mut passed = 0;
             let mut failed = 0;
 
             for example in &examples {
                 println!("\n=== Test: {example} ===");
-                match run_test(example, bless) {
+                match run_example(example, &opts) {
                     Ok(true) => passed += 1,
                     Ok(false) => failed += 1,
                     Err(e) => {
