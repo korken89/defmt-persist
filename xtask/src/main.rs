@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use tempfile::NamedTempFile;
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Build and test tasks for defmt-persist")]
@@ -85,15 +86,30 @@ fn build_example(example: &str, release: bool) -> Result<PathBuf> {
     Ok(elf_path)
 }
 
-fn run_qemu_raw(elf_path: &PathBuf) -> Result<Vec<u8>> {
+/// Output from running QEMU
+struct QemuOutput {
+    /// defmt output from semihosting (stdout)
+    semihosting: Vec<u8>,
+    /// UART output
+    uart: Vec<u8>,
+}
+
+fn run_qemu_raw(elf_path: &PathBuf) -> Result<QemuOutput> {
+    let uart_file = NamedTempFile::new().context("Failed to create temp file for UART")?;
+    let uart_path = uart_file.path();
+
     let output = Command::new("qemu-system-arm")
         .arg("-cpu")
         .arg("cortex-m3")
         .arg("-machine")
         .arg("lm3s6965evb")
         .arg("-nographic")
+        .arg("-monitor")
+        .arg("none")
         .arg("-semihosting-config")
         .arg("enable=on,target=native")
+        .arg("-serial")
+        .arg(format!("file:{}", uart_path.display()))
         .arg("-kernel")
         .arg(elf_path)
         .stdin(Stdio::null())
@@ -109,7 +125,12 @@ fn run_qemu_raw(elf_path: &PathBuf) -> Result<Vec<u8>> {
         );
     }
 
-    Ok(output.stdout)
+    let uart = fs::read(uart_path).unwrap_or_default();
+
+    Ok(QemuOutput {
+        semihosting: output.stdout,
+        uart,
+    })
 }
 
 fn discover_examples() -> Result<Vec<String>> {
@@ -141,29 +162,30 @@ fn run_test(example: &str, bless: bool) -> Result<bool> {
     let elf_path = build_example(example, false)?;
 
     println!("Running in QEMU...");
-    let raw_output = run_qemu_raw(&elf_path)?;
-    let output = defmt::decode_output(&elf_path, &raw_output)?;
+    let qemu_output = run_qemu_raw(&elf_path)?;
+    let output_semihosting = defmt::decode_output(&elf_path, &qemu_output.semihosting)?;
+    let output_uart = defmt::decode_output(&elf_path, &qemu_output.uart)?;
 
     if bless {
         let filename = expected_path.file_name().unwrap().to_string_lossy();
         let status = if expected_path.exists() {
             let existing = fs::read_to_string(&expected_path)?;
-            if existing == output {
+            if existing == output_semihosting {
                 "No change"
             } else {
-                fs::write(&expected_path, &output)?;
+                fs::write(&expected_path, &output_semihosting)?;
                 "Updated"
             }
         } else {
             fs::create_dir_all(expected_path.parent().unwrap())?;
-            fs::write(&expected_path, &output)?;
+            fs::write(&expected_path, &output_semihosting)?;
             "Created"
         };
         println!("  {filename}: {status} ");
         Ok(true)
     } else if expected_path.exists() {
         let expected = fs::read_to_string(&expected_path)?;
-        if output == expected {
+        if output_semihosting == expected && output_uart == expected {
             println!("  PASS");
 
             Ok(true)
@@ -171,15 +193,17 @@ fn run_test(example: &str, bless: bool) -> Result<bool> {
             println!("  FAIL: output differs from expected");
             println!("--- expected ---");
             println!("{expected}");
-            println!("--- actual ---");
-            println!("{output}");
+            println!("--- actual (semihosting) ---");
+            println!("{output_semihosting}");
+            println!("--- actual (uart) ---");
+            println!("{output_uart}");
 
             Ok(false)
         }
     } else {
         println!("  No expected output file, run with --bless to create");
         println!("--- output ---");
-        println!("{output}");
+        println!("{output_semihosting}");
 
         Ok(false)
     }
@@ -193,9 +217,26 @@ fn main() -> Result<()> {
             println!("Building example '{example}'...");
             let elf_path = build_example(&example, release)?;
             println!("Running in QEMU...");
-            let raw_output = run_qemu_raw(&elf_path)?;
-            let output = defmt::decode_output(&elf_path, &raw_output)?;
-            print!("{output}");
+            let qemu_output = run_qemu_raw(&elf_path)?;
+
+            // Print defmt output (decoded from semihosting)
+            let output_semihosting = defmt::decode_output(&elf_path, &qemu_output.semihosting)?;
+            let output_uart = defmt::decode_output(&elf_path, &qemu_output.uart)?;
+            print!("{output_semihosting}");
+            println!("--- QEMU run end ---");
+
+            // Print UART output if any
+            if !qemu_output.uart.is_empty() {
+                if output_semihosting != output_uart {
+                    println!("ERROR: Semihosting and UART output differs");
+                    println!("--- actual (semihosting) ---");
+                    println!("{output_semihosting}");
+                    println!("--- actual (uart) ---");
+                    println!("{output_uart}");
+                } else {
+                    println!("PASS: Semihosting and UART output is equal");
+                }
+            }
         }
 
         Commands::Test { filter, bless } => {

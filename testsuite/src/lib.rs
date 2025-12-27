@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod uart;
+
 use cortex_m_semihosting::debug::{self, EXIT_SUCCESS};
 use defmt_persist as _;
 use panic_semihosting as _;

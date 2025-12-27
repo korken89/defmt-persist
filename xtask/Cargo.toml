@@ -7,3 +7,4 @@ edition = "2024"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 defmt-decoder = { version = "1.0", features = ["unstable"] }
+tempfile = "3"
