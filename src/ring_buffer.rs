@@ -434,7 +434,6 @@ impl<'a, 'c> GrantR<'a, 'c> {
 
 #[cfg(test)]
 mod test {
-    #![expect(clippy::disallowed_macros)]
     #[cfg(feature = "async-await")]
     use crate::atomic_waker::AtomicWaker;
 

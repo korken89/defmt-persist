@@ -79,6 +79,14 @@ jobs:
           targets: thumbv7m-none-eabi
       - run: cargo build --target thumbv7m-none-eabi
 
+  test-lib:
+    name: Test (library)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-features
+
   test:
     name: Test (QEMU, ${{ matrix.profile }})
     runs-on: ubuntu-latest
