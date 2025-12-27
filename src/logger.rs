@@ -10,6 +10,9 @@ use defmt::Encoder;
 #[cfg(feature = "rtt")]
 mod rtt;
 
+#[cfg(feature = "qemu-test")]
+mod semihosting;
+
 #[cfg(feature = "async-await")]
 pub(crate) static WAKER: crate::atomic_waker::AtomicWaker = crate::atomic_waker::AtomicWaker::new();
 
@@ -66,7 +69,7 @@ pub(crate) static LOGGER_STATE: LoggerState = LoggerState {
     depth: AtomicUsize::new(0),
 };
 
-/// Writes data to all configured outputs (ring buffer and optionally RTT).
+/// Writes data to all configured outputs (ring buffer, RTT, and semihosting).
 ///
 /// # Safety
 ///
@@ -79,6 +82,11 @@ unsafe fn write_all(data: &[u8]) {
     // SAFETY: Caller guarantees we're in a critical section.
     unsafe {
         rtt::write(data)
+    };
+    #[cfg(feature = "qemu-test")]
+    // SAFETY: Caller guarantees we're in a critical section.
+    unsafe {
+        semihosting::write(data)
     };
 }
 
@@ -159,7 +167,8 @@ unsafe impl defmt::Logger for Logger {
         }
 
         // SAFETY: Caller (defmt) guarantees this is called between acquire() and release(),
-        // so we're within a critical section.
-        unsafe { write_all(bytes) };
+        // so we're within a critical section. The encoder encodes the bytes and calls
+        // our callback with the encoded data.
+        unsafe { &mut *LOGGER_STATE.encoder.get() }.write(bytes, |b| unsafe { write_all(b) });
     }
 }

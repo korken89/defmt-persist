@@ -1,3 +1,5 @@
+mod defmt;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -54,6 +56,8 @@ fn build_example(example: &str, release: bool) -> Result<PathBuf> {
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&testsuite_dir)
+        .env("DEFMT_LOG", "trace")
+        .stderr(Stdio::null())
         .arg("build")
         .arg("--example")
         .arg(example)
@@ -64,9 +68,7 @@ fn build_example(example: &str, release: bool) -> Result<PathBuf> {
         cmd.arg("--release");
     }
 
-    let status = cmd
-        .status()
-        .context("Failed to run cargo build")?;
+    let status = cmd.status().context("Failed to run cargo build")?;
 
     if !status.success() {
         bail!("cargo build failed");
@@ -83,9 +85,9 @@ fn build_example(example: &str, release: bool) -> Result<PathBuf> {
     Ok(elf_path)
 }
 
-fn run_qemu(elf_path: &PathBuf, capture: bool) -> Result<String> {
-    let mut cmd = Command::new("qemu-system-arm");
-    cmd.arg("-cpu")
+fn run_qemu_raw(elf_path: &PathBuf) -> Result<Vec<u8>> {
+    let output = Command::new("qemu-system-arm")
+        .arg("-cpu")
         .arg("cortex-m3")
         .arg("-machine")
         .arg("lm3s6965evb")
@@ -94,30 +96,20 @@ fn run_qemu(elf_path: &PathBuf, capture: bool) -> Result<String> {
         .arg("enable=on,target=native")
         .arg("-kernel")
         .arg(elf_path)
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .output()
+        .context("Failed to run QEMU")?;
 
-    if capture {
-        let output = cmd
-            .output()
-            .context("Failed to run QEMU")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("QEMU exited with error: {:?}\n{}", output.status.code(), stderr);
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let status = cmd
-            .status()
-            .context("Failed to run QEMU")?;
-
-        if !status.success() {
-            bail!("QEMU exited with error: {:?}", status.code());
-        }
-
-        Ok(String::new())
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "QEMU exited with error: {:?}\n{}",
+            output.status.code(),
+            stderr
+        );
     }
+
+    Ok(output.stdout)
 }
 
 fn discover_examples() -> Result<Vec<String>> {
@@ -143,23 +135,37 @@ fn run_test(example: &str, bless: bool) -> Result<bool> {
     let expected_path = root
         .join("testsuite")
         .join("expected")
-        .join(format!("{example}.txt"));
+        .join(format!("{example}.expected"));
 
     println!("Building '{example}'...");
     let elf_path = build_example(example, false)?;
 
     println!("Running in QEMU...");
-    let output = run_qemu(&elf_path, true)?;
+    let raw_output = run_qemu_raw(&elf_path)?;
+    let output = defmt::decode_output(&elf_path, &raw_output)?;
 
     if bless {
-        fs::create_dir_all(expected_path.parent().unwrap())?;
-        fs::write(&expected_path, &output)?;
-        println!("  Updated {}", expected_path.display());
+        let filename = expected_path.file_name().unwrap().to_string_lossy();
+        let status = if expected_path.exists() {
+            let existing = fs::read_to_string(&expected_path)?;
+            if existing == output {
+                "No change"
+            } else {
+                fs::write(&expected_path, &output)?;
+                "Updated"
+            }
+        } else {
+            fs::create_dir_all(expected_path.parent().unwrap())?;
+            fs::write(&expected_path, &output)?;
+            "Created"
+        };
+        println!("  {filename}: {status} ");
         Ok(true)
     } else if expected_path.exists() {
         let expected = fs::read_to_string(&expected_path)?;
         if output == expected {
             println!("  PASS");
+
             Ok(true)
         } else {
             println!("  FAIL: output differs from expected");
@@ -167,12 +173,14 @@ fn run_test(example: &str, bless: bool) -> Result<bool> {
             println!("{expected}");
             println!("--- actual ---");
             println!("{output}");
+
             Ok(false)
         }
     } else {
         println!("  No expected output file, run with --bless to create");
         println!("--- output ---");
         println!("{output}");
+
         Ok(false)
     }
 }
@@ -185,7 +193,9 @@ fn main() -> Result<()> {
             println!("Building example '{example}'...");
             let elf_path = build_example(&example, release)?;
             println!("Running in QEMU...");
-            run_qemu(&elf_path, false)?;
+            let raw_output = run_qemu_raw(&elf_path)?;
+            let output = defmt::decode_output(&elf_path, &raw_output)?;
+            print!("{output}");
         }
 
         Commands::Test { filter, bless } => {

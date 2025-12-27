@@ -13,6 +13,7 @@ categories = ["embedded", "no-std"]
 [dependencies]
 defmt = "1.0.1"
 critical-section = "1.2"
+cortex-m-semihosting = { version = "0.5", optional = true }
 
 [features]
 default = [
@@ -36,3 +37,6 @@ rtt = [ ]
 # Required for reset-safe persistence on MCUs with 64-bit ECC-protected RAM,
 # such as some STM32 series (e.g., STM32H7, STM32L5).
 ecc-64bit = [ ]
+# Enable semihosting output for QEMU testing. When enabled, defmt frames are
+# written to semihosting stdout in addition to RTT and the ring buffer.
+qemu-test = ["dep:cortex-m-semihosting"]

@@ -1,27 +1,28 @@
 #![no_std]
 #![no_main]
 
-use cortex_m_semihosting::hprintln;
 use testsuite::{entry, exit_success};
 
 #[entry]
 fn main() -> ! {
-    hprintln!("Initializing defmt-persist...");
-
     let consumer = defmt_persist::init();
 
     match consumer {
         Some(_consumer) => {
-            hprintln!("defmt-persist initialized successfully");
+            defmt::info!("defmt-persist initialized successfully");
         }
         None => {
-            hprintln!("defmt-persist already initialized (or failed)");
+            defmt::error!("defmt-persist already initialized (or failed)");
         }
     }
 
-    hprintln!("Logging a test message...");
-    defmt::info!("Hello from defmt-persist!");
+    // Test all log levels
+    defmt::println!("println: Hello from defmt-persist!");
+    defmt::error!("error: This is an error message");
+    defmt::warn!("warn: This is a warning message");
+    defmt::info!("info: This is an info message");
+    defmt::debug!("debug: This is a debug message");
+    defmt::trace!("trace: This is a trace message");
 
-    hprintln!("Test complete");
     exit_success();
 }

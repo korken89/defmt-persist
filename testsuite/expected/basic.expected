@@ -1,0 +1,7 @@
+basic.rs:12: [INFO ] defmt-persist initialized successfully
+basic.rs:20: [PRINT] println: Hello from defmt-persist!
+basic.rs:21: [ERROR] error: This is an error message
+basic.rs:22: [WARN ] warn: This is a warning message
+basic.rs:23: [INFO ] info: This is an info message
+basic.rs:24: [DEBUG] debug: This is a debug message
+basic.rs:25: [TRACE] trace: This is a trace message
