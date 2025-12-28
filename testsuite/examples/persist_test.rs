@@ -12,7 +12,7 @@
 #![no_std]
 #![no_main]
 
-use testsuite::{dump_persist_region, entry, exit_success, uart};
+use testsuite::{dump_persist_region, entry, exit_failure, exit_success, uart};
 
 #[entry]
 fn main() -> ! {
@@ -64,4 +64,10 @@ fn main() -> ! {
 
         exit_success();
     }
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    defmt::error!("{}", defmt::Display2Format(info));
+    exit_failure();
 }

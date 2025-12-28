@@ -5,14 +5,19 @@ pub mod uart;
 use core::future::Future;
 use core::pin::pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use cortex_m_semihosting::debug::{self, EXIT_SUCCESS};
+use cortex_m_semihosting::debug::{self, EXIT_FAILURE, EXIT_SUCCESS};
 use defmt_persist as _;
-use panic_semihosting as _;
 
 pub use cortex_m_rt::entry;
 
 pub fn exit_success() -> ! {
     debug::exit(EXIT_SUCCESS);
+    #[allow(clippy::empty_loop)]
+    loop {}
+}
+
+pub fn exit_failure() -> ! {
+    debug::exit(EXIT_FAILURE);
     #[allow(clippy::empty_loop)]
     loop {}
 }

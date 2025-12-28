@@ -7,7 +7,7 @@
 #![no_main]
 
 use defmt_persist::Consumer;
-use testsuite::{block_on, entry, exit_success, join, uart, yield_once};
+use testsuite::{block_on, entry, exit_failure, exit_success, join, uart, yield_once};
 
 /// Async task that writes log messages with yields in between.
 async fn writer_task() {
@@ -48,4 +48,10 @@ fn main() -> ! {
     block_on(join(writer_task(), reader_task(&mut consumer)));
 
     exit_success();
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    defmt::error!("{}", defmt::Display2Format(info));
+    exit_failure();
 }

@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use crate::build::{build_example, project_root};
 use crate::corrupt::run_corrupt;
+use crate::panic::run_panic;
 use crate::persist::run_persist;
 use crate::standard::run_standard;
 
@@ -19,6 +20,8 @@ pub enum TestMode {
     Persist,
     /// Corruption test: verify buffer handles corrupted persist region.
     Corrupt,
+    /// Panic test: two-phase run, compare recovered output against expected.
+    Panic,
 }
 
 /// Options for running an example.
@@ -41,6 +44,7 @@ fn detect_test_mode(example_path: &PathBuf) -> TestMode {
                 match mode.trim() {
                     "persist" => return TestMode::Persist,
                     "corrupt" => return TestMode::Corrupt,
+                    "panic" => return TestMode::Panic,
                     _ => {}
                 }
             }
@@ -67,5 +71,6 @@ pub fn run_example(example: &str, opts: &RunOptions) -> Result<bool> {
         TestMode::Standard => run_standard(example, &elf_path, opts),
         TestMode::Persist => run_persist(&elf_path, opts),
         TestMode::Corrupt => run_corrupt(&elf_path, opts),
+        TestMode::Panic => run_panic(example, &elf_path, opts),
     }
 }

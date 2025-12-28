@@ -1,6 +1,7 @@
 mod build;
 mod corrupt;
 mod defmt;
+mod panic;
 mod persist;
 mod qemu;
 mod runner;
