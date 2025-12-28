@@ -54,8 +54,8 @@ Then call `init` early in your program and use the returned `Consumer` to
 read and transmit buffered logs:
 
 ```rust,ignore
-let Some(mut consumer) = defmt_persist::init() else {
-    panic!("Already initialized");
+let Ok(mut consumer) = defmt_persist::init() else {
+    panic!("init failed");
 };
 
 // Drain any persisted logs from before the reset

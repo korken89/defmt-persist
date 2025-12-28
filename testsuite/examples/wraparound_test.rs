@@ -11,9 +11,7 @@ use testsuite::{entry, exit_success, uart};
 
 #[entry]
 fn main() -> ! {
-    let Some(mut consumer) = defmt_persist::init() else {
-        panic!("defmt-persist already initialized (or failed)");
-    };
+    let mut consumer = defmt_persist::init().unwrap();
 
     // Log 1000 messages - this will wrap around the buffer many times.
     for i in 0..1000u32 {

@@ -43,9 +43,7 @@ async fn reader_task(consumer: &mut Consumer<'static>) {
 
 #[entry]
 fn main() -> ! {
-    let Some(mut consumer) = defmt_persist::init() else {
-        panic!("defmt-persist already initialized (or failed)");
-    };
+    let mut consumer = defmt_persist::init().unwrap();
 
     block_on(join(writer_task(), reader_task(&mut consumer)));
 

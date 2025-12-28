@@ -13,9 +13,7 @@ use testsuite::{dump_persist_region, entry, exit_success, uart};
 
 #[entry]
 fn main() -> ! {
-    let Some(mut consumer) = defmt_persist::init() else {
-        panic!("defmt-persist already initialized (or failed)");
-    };
+    let mut consumer = defmt_persist::init().unwrap();
 
     // Check if there's any data (indicates recovered buffer).
     let first_read = consumer.read();

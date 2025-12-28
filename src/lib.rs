@@ -12,17 +12,32 @@ pub(crate) mod atomic_waker;
 pub(crate) mod logger;
 mod ring_buffer;
 
+/// Error returned by [`init`] when initialization fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum InitError {
+    /// [`init`] has already been called.
+    AlreadyInitialized,
+    /// Memory region is not properly aligned for the ring buffer header.
+    BadAlignment,
+    /// Memory region is too small to hold the ring buffer header plus data.
+    TooSmall,
+    /// Buffer size would overflow pointer arithmetic.
+    TooLarge,
+}
+
 /// Initialize the logger.
 ///
 /// This reads the buffer region from the linker symbols `__defmt_persist_start` and
 /// `__defmt_persist_end`. Define these in your linker script to reserve memory for
 /// the persist buffer.
 ///
-/// Returns `None` if:
-/// - Already initialized (called more than once)
-/// - Memory region is not properly aligned for [`RingBuffer`]
-/// - Memory region is too small to hold the [`RingBuffer`] header plus data
-/// - Buffer size would overflow pointer arithmetic
+/// # Errors
+///
+/// Returns an error if:
+/// - [`InitError::AlreadyInitialized`]: Called more than once
+/// - [`InitError::BadAlignment`]: Memory region is not properly aligned
+/// - [`InitError::TooSmall`]: Memory region is too small for the header plus data
+/// - [`InitError::TooLarge`]: Buffer size would overflow pointer arithmetic
 ///
 /// # Safety considerations
 ///
@@ -32,7 +47,7 @@ mod ring_buffer;
 ///
 /// Corrupt memory may be accepted as valid. While index bounds are validated,
 /// the data content is not. Treat recovered logs as untrusted external input.
-pub fn init() -> Option<Consumer<'static>> {
+pub fn init() -> Result<Consumer<'static>, InitError> {
     // SAFETY: These symbols are provided by the linker script and point to a reserved memory region.
     unsafe extern "C" {
         static __defmt_persist_start: u8;
@@ -42,7 +57,7 @@ pub fn init() -> Option<Consumer<'static>> {
     static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
     if INITIALIZED.swap(true, Ordering::SeqCst) {
-        return None;
+        return Err(InitError::AlreadyInitialized);
     }
 
     let start = (&raw const __defmt_persist_start).expose_provenance();
@@ -51,15 +66,15 @@ pub fn init() -> Option<Consumer<'static>> {
 
     // Validate alignment and size requirements.
     if !memory.start.is_multiple_of(align_of::<RingBuffer>()) {
-        return None;
+        return Err(InitError::BadAlignment);
     }
     if memory.len() <= size_of::<RingBuffer>() {
-        return None;
+        return Err(InitError::TooSmall);
     }
     // Ensure buffer size doesn't overflow pointer arithmetic.
     let buf_len = memory.len() - size_of::<RingBuffer>();
     if buf_len >= isize::MAX as usize / 4 {
-        return None;
+        return Err(InitError::TooLarge);
     }
 
     // SAFETY: Linker symbols provide the memory region. The atomic swap above
@@ -70,5 +85,5 @@ pub fn init() -> Option<Consumer<'static>> {
     // SAFETY: The atomic swap guarantees this is called only once.
     unsafe { logger::LOGGER_STATE.initialize(p) };
 
-    Some(c)
+    Ok(c)
 }

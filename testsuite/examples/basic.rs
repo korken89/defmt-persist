@@ -5,9 +5,7 @@ use testsuite::{entry, exit_success, uart};
 
 #[entry]
 fn main() -> ! {
-    let Some(mut consumer) = defmt_persist::init() else {
-        panic!("defmt-persist already initialized (or failed)");
-    };
+    let mut consumer = defmt_persist::init().unwrap();
 
     // Test all log levels.
     defmt::println!("println: Hello from defmt-persist!");
