@@ -8,9 +8,6 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering, fence},
 };
 
-#[cfg(feature = "async-await")]
-use crate::atomic_waker::AtomicWaker;
-
 /// A single-producer, single-consumer (SPSC) lock-free queue storing up to `len-1` bytes.
 /// `len` is defined by the leftover size of the region after the [`RingBuffer`] has taken its
 /// size.
@@ -70,8 +67,6 @@ pub struct Producer<'a> {
 pub struct Consumer<'a> {
     header: &'a RingBuffer,
     buf: &'a [UnsafeCell<MaybeUninit<u8>>],
-    #[cfg(feature = "async-await")]
-    waker: &'a AtomicWaker,
 }
 
 // SAFETY: Consumer can be safely sent to another thread because:
@@ -127,7 +122,6 @@ impl RingBuffer {
     /// input and do not rely on its value for memory safety.
     pub(crate) unsafe fn recover_or_reinitialize(
         memory: Range<usize>,
-        #[cfg(feature = "async-await")] waker: &'static AtomicWaker,
     ) -> (Producer<'static>, Consumer<'static>) {
         let v: *mut Self = ptr::with_exposed_provenance_mut(memory.start);
         let buf_len = memory.len() - size_of::<RingBuffer>();
@@ -205,17 +199,10 @@ impl RingBuffer {
         };
 
         // SAFETY: The caller guarantees buf.len() < isize::MAX / 4.
-        unsafe {
-            v.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                waker,
-            )
-        }
+        unsafe { v.split(buf) }
     }
 
-    /// Splits the queue into producer and consumer given a memory area, and if `async-await`
-    /// feature is enabled, the storage area for a waker.
+    /// Splits the queue into producer and consumer given a memory area.
     ///
     /// # Safety
     ///
@@ -223,16 +210,10 @@ impl RingBuffer {
     pub const unsafe fn split<'a>(
         &'a mut self,
         buf: &'a [UnsafeCell<MaybeUninit<u8>>],
-        #[cfg(feature = "async-await")] waker: &'a AtomicWaker,
     ) -> (Producer<'a>, Consumer<'a>) {
         (
             Producer { header: self, buf },
-            Consumer {
-                header: self,
-                buf,
-                #[cfg(feature = "async-await")]
-                waker,
-            },
+            Consumer { header: self, buf },
         )
     }
 }
@@ -383,7 +364,7 @@ impl Consumer<'_> {
     /// Waits until there is data in the [`Consumer`].
     pub async fn wait_for_data(&mut self) {
         core::future::poll_fn(|cx| {
-            self.waker.register(cx.waker());
+            super::logger::WAKER.register(cx.waker());
 
             if self.is_empty() {
                 core::task::Poll::Pending
@@ -445,8 +426,6 @@ impl<'a, 'c> GrantR<'a, 'c> {
 
 #[cfg(test)]
 mod test {
-    #[cfg(feature = "async-await")]
-    use crate::atomic_waker::AtomicWaker;
 
     use super::*;
 
@@ -454,16 +433,8 @@ mod test {
     fn touching_no_boundaries() {
         let mut b = RingBuffer::new(1, 1);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        #[cfg(feature = "async-await")]
-        let waker = AtomicWaker::new();
         // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
-        let (mut p, mut c) = unsafe {
-            b.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                &waker,
-            )
-        };
+        let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -477,16 +448,8 @@ mod test {
     fn fill_simple() {
         let mut b = RingBuffer::new(0, 0);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        #[cfg(feature = "async-await")]
-        let waker = AtomicWaker::new();
         // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
-        let (mut p, mut c) = unsafe {
-            b.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                &waker,
-            )
-        };
+        let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2, 3]);
 
         let r = c.read();
@@ -500,16 +463,8 @@ mod test {
     fn fill_crossing_end() {
         let mut b = RingBuffer::new(2, 2);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        #[cfg(feature = "async-await")]
-        let waker = AtomicWaker::new();
         // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
-        let (mut p, mut c) = unsafe {
-            b.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                &waker,
-            )
-        };
+        let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2, 3]);
 
         let r = c.read();
@@ -526,16 +481,8 @@ mod test {
     fn underfill_crossing_end() {
         let mut b = RingBuffer::new(3, 3);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        #[cfg(feature = "async-await")]
-        let waker = AtomicWaker::new();
         // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
-        let (mut p, mut c) = unsafe {
-            b.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                &waker,
-            )
-        };
+        let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -552,16 +499,8 @@ mod test {
     fn overfill() {
         let mut b = RingBuffer::new(0, 0);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        #[cfg(feature = "async-await")]
-        let waker = AtomicWaker::new();
         // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
-        let (mut p, mut c) = unsafe {
-            b.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                &waker,
-            )
-        };
+        let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2, 3, 4, 5, 6, 7]);
 
         let r = c.read();
@@ -575,16 +514,8 @@ mod test {
     fn stop_at_end() {
         let mut b = RingBuffer::new(2, 2);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        #[cfg(feature = "async-await")]
-        let waker = AtomicWaker::new();
         // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
-        let (mut p, mut c) = unsafe {
-            b.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                &waker,
-            )
-        };
+        let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -602,16 +533,8 @@ mod test {
             write: AtomicUsize::new(2),
         };
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        #[cfg(feature = "async-await")]
-        let waker = AtomicWaker::new();
         // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
-        let (mut p, mut c) = unsafe {
-            b.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                &waker,
-            )
-        };
+        let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1]);
 
         let r = c.read();
@@ -625,16 +548,8 @@ mod test {
     fn zero_release() {
         let mut b = RingBuffer::new(2, 2);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        #[cfg(feature = "async-await")]
-        let waker = AtomicWaker::new();
         // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
-        let (mut p, mut c) = unsafe {
-            b.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                &waker,
-            )
-        };
+        let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -648,16 +563,8 @@ mod test {
     fn partial_release() {
         let mut b = RingBuffer::new(2, 2);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        #[cfg(feature = "async-await")]
-        let waker = AtomicWaker::new();
         // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
-        let (mut p, mut c) = unsafe {
-            b.split(
-                buf,
-                #[cfg(feature = "async-await")]
-                &waker,
-            )
-        };
+        let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 
         let r = c.read();

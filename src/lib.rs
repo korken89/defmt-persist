@@ -65,13 +65,7 @@ pub fn init() -> Option<Consumer<'static>> {
     // SAFETY: Linker symbols provide the memory region. The atomic swap above
     // guarantees this code runs exactly once, ensuring exclusive ownership.
     // Alignment and size are validated above.
-    let (p, c) = unsafe {
-        RingBuffer::recover_or_reinitialize(
-            memory,
-            #[cfg(feature = "async-await")]
-            &logger::WAKER,
-        )
-    };
+    let (p, c) = unsafe { RingBuffer::recover_or_reinitialize(memory) };
 
     // SAFETY: The atomic swap guarantees this is called only once.
     unsafe { logger::LOGGER_STATE.initialize(p) };
