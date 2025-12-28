@@ -74,7 +74,7 @@ loop {
 
 - `rtt`: Also output logs via RTT (default: enabled)
 - `async-await`: Enable async API for waiting on new data (default: enabled)
-- `ecc-64bit`: Add padding for MCUs with 64-bit ECC RAM (default: enabled)
+- `ecc-64bit`: Add padding for MCUs with 64-bit ECC RAM, e.g. STM32H7/H5 (default: enabled)
 
 ## License
 

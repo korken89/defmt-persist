@@ -24,6 +24,11 @@ use crate::atomic_waker::AtomicWaker;
 ///
 /// Note: The struct layout changes with this feature, so the MAGIC value differs to
 /// force reinitialization when switching between configurations.
+///
+/// Note: Data writes don't need explicit ECC flushes. STM32H7/H5 MCUs use a single-word
+/// ECC write cache - when we subsequently update the index (a different 64-bit word),
+/// the cached data write is automatically flushed. The index itself needs the padding
+/// write to flush its own 64-bit word before a potential reset.
 #[repr(C)]
 pub struct RingBuffer {
     /// If the value is [`MAGIC`], the struct is initialized.

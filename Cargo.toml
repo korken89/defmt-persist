@@ -36,7 +36,14 @@ async-await = [ ]
 rtt = [ ]
 # Adds padding to ensure each atomic field occupies its own 64-bit ECC word.
 # Required for reset-safe persistence on MCUs with 64-bit ECC-protected RAM,
-# such as some STM32 series (e.g., STM32H7, STM32L5).
+# such as some STM32 series (e.g., STM32H7, STM32H5).
+#
+# These MCUs use a single-word ECC write cache. Unaligned writes stay in cache
+# until a write to a different word flushes them. Without padding, a reset
+# mid-write could corrupt both read and write indices if they share an ECC word.
+# With padding, each index occupies its own 64-bit word and is explicitly flushed.
+#
+# See: https://community.st.com/t5/stm32-mcus/faq-stm32-sram-backup-sram-content-is-not-preserved-after-reset/ta-p/861433
 ecc-64bit = [ ]
 # Enable semihosting output for QEMU testing. When enabled, defmt frames are
 # written to semihosting stdout in addition to RTT and the ring buffer.
