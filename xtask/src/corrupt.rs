@@ -7,9 +7,8 @@ use anyhow::{Context, Result};
 use tempfile::NamedTempFile;
 
 use crate::defmt;
-use crate::persist::PERSIST_ADDR;
 use crate::qemu::{MemoryLoad, run_qemu};
-use crate::runner::RunOptions;
+use crate::runner::{PERSIST_ADDR, RunOptions};
 
 /// Corruption scenario flags.
 #[derive(Debug, Clone, Copy)]

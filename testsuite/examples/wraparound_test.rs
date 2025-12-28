@@ -1,3 +1,6 @@
+//! @test-run: single
+//! @test-validate: expected
+//!
 //! Test that verifies ring buffer wraparound behavior.
 //!
 //! Logs 1000 messages to guarantee multiple buffer wraparounds,

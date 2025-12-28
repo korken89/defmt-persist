@@ -1,3 +1,6 @@
+//! @test-run: single
+//! @test-validate: expected
+
 #![no_std]
 #![no_main]
 

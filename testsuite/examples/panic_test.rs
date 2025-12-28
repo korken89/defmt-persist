@@ -1,4 +1,5 @@
-//! @test-mode: panic
+//! @test-run: persist
+//! @test-validate: expected
 //!
 //! Panic persistence test that runs in two phases:
 //!

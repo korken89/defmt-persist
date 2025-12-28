@@ -1,0 +1,12 @@
+[PRINT] println: Hello from defmt-persist!
+[ERROR] error: This is an error message
+[WARN ] warn: This is a warning message
+[INFO ] info: This is an info message
+[DEBUG] debug: This is a debug message
+[TRACE] trace: This is a trace message
+[PRINT] println: Hello from defmt-persist!
+[ERROR] error: This is an error message
+[WARN ] warn: This is a warning message
+[INFO ] info: This is an info message
+[DEBUG] debug: This is a debug message
+[TRACE] trace: This is a trace message

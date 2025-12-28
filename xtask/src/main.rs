@@ -1,11 +1,8 @@
 mod build;
 mod corrupt;
 mod defmt;
-mod panic;
-mod persist;
 mod qemu;
 mod runner;
-mod standard;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};

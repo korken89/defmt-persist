@@ -1,3 +1,6 @@
+//! @test-run: single
+//! @test-validate: expected
+//!
 //! Test for the async-await API.
 //!
 //! This test verifies that `Consumer::wait_for_data()` works correctly

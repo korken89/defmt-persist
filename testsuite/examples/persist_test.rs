@@ -1,13 +1,10 @@
-//! @test-mode: persist
+//! @test-run: persist
+//! @test-validate: expected
 //!
 //! Persistence test that runs in two phases:
 //!
 //! Phase 1 (fresh start): Write logs and dump persist region via UART1.
-//! Phase 2 (with snapshot): Read recovered logs and output via UART0.
-//!
-//! The xtask runs this twice:
-//! 1. First run: captures UART1 (persist region dump).
-//! 2. Second run: pre-loads persist region via QEMU loader, captures UART0.
+//! Phase 2 (with snapshot): Read recovered logs and compare against expected.
 
 #![no_std]
 #![no_main]

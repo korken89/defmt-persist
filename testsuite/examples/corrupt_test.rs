@@ -1,4 +1,5 @@
-//! @test-mode: corrupt
+//! @test-run: persist
+//! @test-validate: corrupt
 //!
 //! Corruption test that verifies the ring buffer handles corrupted persist regions.
 //!
