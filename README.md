@@ -76,6 +76,28 @@ loop {
 - `async-await`: Enable async API for waiting on new data (default: enabled)
 - `ecc-64bit`: Add padding for MCUs with 64-bit ECC RAM, e.g. STM32H7/H5 (default: enabled)
 
+## Testing
+
+Run the library unit tests:
+
+```bash
+cargo test --all-features
+```
+
+Run the full QEMU-based integration testsuite (requires `qemu-system-arm`):
+
+```bash
+cargo xtask test [example_name]
+```
+
+This runs tests for persistence across resets, buffer corruption recovery, async API, and ring buffer wraparound.
+
+To run a single example in QEMU during development:
+
+```bash
+cargo xtask qemu <example_name>
+```
+
 ## License
 
 Licensed under either of Apache License, Version 2.0 or MIT license at your option.
