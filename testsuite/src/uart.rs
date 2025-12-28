@@ -7,7 +7,7 @@
 //! QEMU serial port mapping: `qemu-system-arm ... -serial <uart0> -serial <uart1>`
 //! The first `-serial` argument maps to UART0, the second to UART1, etc.
 
-use core::ptr::{read_volatile, write_volatile};
+use core::ptr::{with_exposed_provenance, with_exposed_provenance_mut};
 
 const UART0_BASE: usize = 0x4000_C000;
 const UART1_BASE: usize = 0x4000_D000;
@@ -18,11 +18,11 @@ const UART_FR_TXFF: u32 = 0x20; // Transmit FIFO Full
 
 /// Write a single byte to a UART.
 fn uart_write_byte(base: usize, byte: u8) {
-    let dr = (base + UART_DR_OFFSET) as *mut u32;
-    let fr = (base + UART_FR_OFFSET) as *const u32;
+    let dr = with_exposed_provenance_mut::<u32>(base + UART_DR_OFFSET);
+    let fr = with_exposed_provenance::<u32>(base + UART_FR_OFFSET);
     unsafe {
-        while read_volatile(fr) & UART_FR_TXFF != 0 {}
-        write_volatile(dr, byte as u32);
+        while fr.read_volatile() & UART_FR_TXFF != 0 {}
+        dr.write_volatile(byte as u32);
     }
 }
 

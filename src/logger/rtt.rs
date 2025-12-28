@@ -51,8 +51,7 @@ const MODE_NON_BLOCKING_TRIM: usize = 1;
 // So we declare the RTT control block here and make it impossible to use `rtt-target` together
 // with this crate.
 #[unsafe(no_mangle)]
-static _SEGGER_RTT: RttHeader =
-    RttHeader::new(&NAME as *const _ as *const u8, BUFFER.0.get().cast());
+static _SEGGER_RTT: RttHeader = RttHeader::new(NAME.as_ptr(), BUFFER.0.get().cast());
 
 #[cfg_attr(target_os = "macos", unsafe(link_section = ".uninit,defmt-rtt.BUFFER"))]
 #[cfg_attr(
