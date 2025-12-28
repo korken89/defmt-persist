@@ -10,7 +10,7 @@
 #![no_std]
 #![no_main]
 
-use testsuite::{entry, exit_failure, exit_success, uart};
+use testsuite::{drain_to_uart, entry, exit_failure, exit_success};
 
 #[entry]
 fn main() -> ! {
@@ -22,26 +22,12 @@ fn main() -> ! {
 
         // Drain the buffer periodically to avoid overflow.
         if i.is_multiple_of(20) {
-            loop {
-                let data = consumer.read();
-                if data.buf().is_empty() {
-                    break;
-                }
-                uart::write_bytes(data.buf());
-                data.release(0xffffffff);
-            }
+            drain_to_uart(&mut consumer);
         }
     }
 
     // Drain any remaining messages.
-    loop {
-        let data = consumer.read();
-        if data.buf().is_empty() {
-            break;
-        }
-        uart::write_bytes(data.buf());
-        data.release(0xffffffff);
-    }
+    drain_to_uart(&mut consumer);
 
     exit_success();
 }

@@ -4,7 +4,7 @@
 #![no_std]
 #![no_main]
 
-use testsuite::{entry, exit_failure, exit_success, uart};
+use testsuite::{drain_to_uart, entry, exit_failure, exit_success};
 
 #[entry]
 fn main() -> ! {
@@ -19,15 +19,7 @@ fn main() -> ! {
     defmt::trace!("trace: This is a trace message");
 
     // Send all logs over UART as well.
-    loop {
-        let data = consumer.read();
-
-        if data.buf().is_empty() {
-            break;
-        }
-        uart::write_bytes(data.buf());
-        data.release(0xffffffff);
-    }
+    drain_to_uart(&mut consumer);
 
     exit_success();
 }

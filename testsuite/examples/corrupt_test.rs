@@ -10,7 +10,7 @@
 #![no_std]
 #![no_main]
 
-use testsuite::{dump_persist_region, entry, exit_failure, exit_success, uart};
+use testsuite::{drain_to_uart, dump_persist_region, entry, exit_failure, exit_success};
 
 #[entry]
 fn main() -> ! {
@@ -23,17 +23,8 @@ fn main() -> ! {
     if has_data {
         // Phase 3: Buffer was recovered - output what we got.
         // (This happens when valid snapshot is loaded)
-        uart::write_bytes(first_read.buf());
-        first_read.release(0xffffffff);
-
-        loop {
-            let data = consumer.read();
-            if data.buf().is_empty() {
-                break;
-            }
-            uart::write_bytes(data.buf());
-            data.release(0xffffffff);
-        }
+        first_read.release(0);
+        drain_to_uart(&mut consumer);
     } else {
         // Phase 1 or 2: Buffer is empty (fresh init or corruption detected).
         first_read.release(0);
@@ -45,14 +36,7 @@ fn main() -> ! {
         dump_persist_region();
 
         // Output logs via UART0.
-        loop {
-            let data = consumer.read();
-            if data.buf().is_empty() {
-                break;
-            }
-            uart::write_bytes(data.buf());
-            data.release(0xffffffff);
-        }
+        drain_to_uart(&mut consumer);
     }
 
     exit_success();

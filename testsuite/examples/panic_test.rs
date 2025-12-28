@@ -13,7 +13,7 @@
 #![no_std]
 #![no_main]
 
-use testsuite::{dump_persist_region, entry, exit_success, uart};
+use testsuite::{drain_to_uart, dump_persist_region, entry, exit_success};
 
 #[entry]
 fn main() -> ! {
@@ -27,17 +27,8 @@ fn main() -> ! {
         // Phase 2: Read recovered logs and output via UART0.
         defmt::info!("Some text during second run after a panic.");
 
-        uart::write_bytes(first_read.buf());
-        first_read.release(0xffffffff);
-
-        loop {
-            let data = consumer.read();
-            if data.buf().is_empty() {
-                break;
-            }
-            uart::write_bytes(data.buf());
-            data.release(0xffffffff);
-        }
+        first_read.release(0);
+        drain_to_uart(&mut consumer);
 
         exit_success();
     } else {

@@ -6,7 +6,7 @@ use core::future::Future;
 use core::pin::pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use cortex_m_semihosting::debug::{self, EXIT_FAILURE, EXIT_SUCCESS};
-use defmt_persist as _;
+use defmt_persist::Consumer;
 
 pub use cortex_m_rt::entry;
 
@@ -20,6 +20,18 @@ pub fn exit_failure() -> ! {
     debug::exit(EXIT_FAILURE);
     #[allow(clippy::empty_loop)]
     loop {}
+}
+
+/// Drain all available data from the consumer and send via UART0.
+pub fn drain_to_uart(consumer: &mut Consumer<'_>) {
+    loop {
+        let data = consumer.read();
+        if data.buf().is_empty() {
+            break;
+        }
+        uart::write_bytes(data.buf());
+        data.release(0xffffffff);
+    }
 }
 
 /// Dump the PERSIST region via UART1.

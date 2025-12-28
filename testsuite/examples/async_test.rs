@@ -10,7 +10,7 @@
 #![no_main]
 
 use defmt_persist::Consumer;
-use testsuite::{block_on, entry, exit_failure, exit_success, join, uart, yield_once};
+use testsuite::{block_on, drain_to_uart, entry, exit_failure, exit_success, join, yield_once};
 
 /// Async task that writes log messages with yields in between.
 async fn writer_task() {
@@ -33,14 +33,7 @@ async fn reader_task(consumer: &mut Consumer<'static>) {
         consumer.wait_for_data().await;
 
         // Read and output all available data.
-        loop {
-            let data = consumer.read();
-            if data.buf().is_empty() {
-                break;
-            }
-            uart::write_bytes(data.buf());
-            data.release(0xffffffff);
-        }
+        drain_to_uart(consumer);
     }
 }
 
