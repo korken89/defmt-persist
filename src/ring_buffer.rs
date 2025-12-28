@@ -107,10 +107,14 @@ impl RingBuffer {
     ///
     /// # Safety
     ///
-    /// This takes logical ownership of the provided `memory` for the
-    /// `'static` lifetime. Make sure that any previous owner is no longer
-    /// live, for example by only ever having one application running at a
-    /// time and only one call to this function in the application's lifetime.
+    /// - `memory.start` must be aligned to `align_of::<RingBuffer>()`.
+    /// - `memory.len()` must be greater than `size_of::<RingBuffer>()`.
+    /// - Buffer size (`memory.len() - size_of::<RingBuffer>()`) must be less than
+    ///   `isize::MAX / 4` to avoid overflow in pointer arithmetic.
+    /// - This takes logical ownership of the provided `memory` for the
+    ///   `'static` lifetime. Make sure that any previous owner is no longer
+    ///   live, for example by only ever having one application running at a
+    ///   time and only one call to this function in the application's lifetime.
     ///
     /// It is, however, not a problem for both a bootloader and its booted
     /// application to call this function, provided the bootloader program
@@ -125,15 +129,12 @@ impl RingBuffer {
         memory: Range<usize>,
         #[cfg(feature = "async-await")] waker: &'static AtomicWaker,
     ) -> (Producer<'static>, Consumer<'static>) {
-        assert!(memory.start.is_multiple_of(align_of::<RingBuffer>()));
-        assert!(memory.len() > size_of::<RingBuffer>());
-
         let v: *mut Self = ptr::with_exposed_provenance_mut(memory.start);
         let buf_len = memory.len() - size_of::<RingBuffer>();
 
         // SAFETY:
-        // - Alignment is guaranteed by assert above
-        // - Size is guaranteed by the assert above.
+        // - Alignment is guaranteed by the caller.
+        // - Size is guaranteed by the caller.
         // - All fields (`u128`, `AtomicUsize`, `[UnsafeCell<MaybeUninit<u8>>, X]`)
         //   are valid for any bit pattern, so interpreting the raw memory as this
         //   type and buffer is sound. As the memory is initialized outside the Rust abstract
@@ -192,8 +193,7 @@ impl RingBuffer {
         fence(Ordering::SeqCst);
 
         // SAFETY:
-        // - The assert at the start of this method guarantees at least 1 byte of space left
-        //   in the allocated area.
+        // - The caller guarantees at least 1 byte of space left in the allocated area.
         // - There are no alignment requirements on the values in the buffer.
         // - There is no mutable aliasing, all slices made from this buffer are immutable - writes
         //   are made via the `UnsafeCell`s interior mutability.
@@ -204,21 +204,27 @@ impl RingBuffer {
             )
         };
 
-        v.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            waker,
-        )
+        // SAFETY: The caller guarantees buf.len() < isize::MAX / 4.
+        unsafe {
+            v.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                waker,
+            )
+        }
     }
 
     /// Splits the queue into producer and consumer given a memory area, and if `async-await`
     /// feature is enabled, the storage area for a waker.
-    pub const fn split<'a>(
+    ///
+    /// # Safety
+    ///
+    /// `buf.len()` must be less than `isize::MAX / 4` to avoid overflow in pointer arithmetic.
+    pub const unsafe fn split<'a>(
         &'a mut self,
         buf: &'a [UnsafeCell<MaybeUninit<u8>>],
         #[cfg(feature = "async-await")] waker: &'a AtomicWaker,
     ) -> (Producer<'a>, Consumer<'a>) {
-        assert!(buf.len() < isize::MAX as usize / 4);
         (
             Producer { header: self, buf },
             Consumer {
@@ -450,11 +456,14 @@ mod test {
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
         #[cfg(feature = "async-await")]
         let waker = AtomicWaker::new();
-        let (mut p, mut c) = b.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            &waker,
-        );
+        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        let (mut p, mut c) = unsafe {
+            b.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                &waker,
+            )
+        };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -470,11 +479,14 @@ mod test {
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
         #[cfg(feature = "async-await")]
         let waker = AtomicWaker::new();
-        let (mut p, mut c) = b.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            &waker,
-        );
+        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        let (mut p, mut c) = unsafe {
+            b.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                &waker,
+            )
+        };
         p.write(&[1, 2, 3]);
 
         let r = c.read();
@@ -490,11 +502,14 @@ mod test {
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
         #[cfg(feature = "async-await")]
         let waker = AtomicWaker::new();
-        let (mut p, mut c) = b.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            &waker,
-        );
+        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        let (mut p, mut c) = unsafe {
+            b.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                &waker,
+            )
+        };
         p.write(&[1, 2, 3]);
 
         let r = c.read();
@@ -513,11 +528,14 @@ mod test {
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
         #[cfg(feature = "async-await")]
         let waker = AtomicWaker::new();
-        let (mut p, mut c) = b.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            &waker,
-        );
+        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        let (mut p, mut c) = unsafe {
+            b.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                &waker,
+            )
+        };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -536,11 +554,14 @@ mod test {
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
         #[cfg(feature = "async-await")]
         let waker = AtomicWaker::new();
-        let (mut p, mut c) = b.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            &waker,
-        );
+        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        let (mut p, mut c) = unsafe {
+            b.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                &waker,
+            )
+        };
         p.write(&[1, 2, 3, 4, 5, 6, 7]);
 
         let r = c.read();
@@ -556,11 +577,14 @@ mod test {
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
         #[cfg(feature = "async-await")]
         let waker = AtomicWaker::new();
-        let (mut p, mut c) = b.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            &waker,
-        );
+        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        let (mut p, mut c) = unsafe {
+            b.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                &waker,
+            )
+        };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -580,11 +604,14 @@ mod test {
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
         #[cfg(feature = "async-await")]
         let waker = AtomicWaker::new();
-        let (mut p, mut c) = b.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            &waker,
-        );
+        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        let (mut p, mut c) = unsafe {
+            b.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                &waker,
+            )
+        };
         p.write(&[1]);
 
         let r = c.read();
@@ -600,11 +627,14 @@ mod test {
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
         #[cfg(feature = "async-await")]
         let waker = AtomicWaker::new();
-        let (mut p, mut c) = b.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            &waker,
-        );
+        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        let (mut p, mut c) = unsafe {
+            b.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                &waker,
+            )
+        };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -620,11 +650,14 @@ mod test {
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
         #[cfg(feature = "async-await")]
         let waker = AtomicWaker::new();
-        let (mut p, mut c) = b.split(
-            buf,
-            #[cfg(feature = "async-await")]
-            &waker,
-        );
+        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        let (mut p, mut c) = unsafe {
+            b.split(
+                buf,
+                #[cfg(feature = "async-await")]
+                &waker,
+            )
+        };
         p.write(&[1, 2]);
 
         let r = c.read();
