@@ -8,14 +8,6 @@ use panic_semihosting as _;
 
 pub use cortex_m_rt::entry;
 
-// Provide a dummy timestamp for defmt (no real timer in QEMU tests)
-defmt::timestamp!("{=u64}", 0);
-
-unsafe extern "C" {
-    static __defmt_persist_start: u8;
-    static __defmt_persist_end: u8;
-}
-
 pub fn exit_success() -> ! {
     debug::exit(EXIT_SUCCESS);
     #[allow(clippy::empty_loop)]
@@ -28,6 +20,11 @@ pub fn exit_success() -> ! {
 /// which can be captured and used to initialize the region in
 /// a subsequent test.
 pub fn dump_persist_region() {
+    unsafe extern "C" {
+        static __defmt_persist_start: u8;
+        static __defmt_persist_end: u8;
+    }
+
     let start = (&raw const __defmt_persist_start) as *const u8;
     let end = (&raw const __defmt_persist_end) as *const u8;
     let len = end as usize - start as usize;
