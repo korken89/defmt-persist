@@ -12,17 +12,6 @@ pub(crate) mod atomic_waker;
 pub(crate) mod logger;
 mod ring_buffer;
 
-// Linker symbols defining the persist buffer region.
-// Must be defined in the user's linker script.
-// SAFETY: These symbols are provided by the linker script and point to a reserved memory region.
-unsafe extern "C" {
-    static __defmt_persist_start: u8;
-    static __defmt_persist_end: u8;
-}
-
-/// Tracks whether [`init`] has been called.
-static INITIALIZED: AtomicBool = AtomicBool::new(false);
-
 /// Initialize the logger.
 ///
 /// This reads the buffer region from the linker symbols `__defmt_persist_start` and
@@ -44,6 +33,14 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Corrupt memory may be accepted as valid. While index bounds are validated,
 /// the data content is not. Treat recovered logs as untrusted external input.
 pub fn init() -> Option<Consumer<'static>> {
+    // SAFETY: These symbols are provided by the linker script and point to a reserved memory region.
+    unsafe extern "C" {
+        static __defmt_persist_start: u8;
+        static __defmt_persist_end: u8;
+    }
+
+    static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         return None;
     }
