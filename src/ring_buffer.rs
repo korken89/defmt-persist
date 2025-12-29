@@ -207,6 +207,7 @@ impl RingBuffer {
     /// # Safety
     ///
     /// `buf.len()` must be less than `isize::MAX / 4` to avoid overflow in pointer arithmetic.
+    #[inline]
     pub const unsafe fn split<'a>(
         &'a mut self,
         buf: &'a [UnsafeCell<MaybeUninit<u8>>],
@@ -220,6 +221,7 @@ impl RingBuffer {
 
 impl Producer<'_> {
     /// How much space is left in the buffer?
+    #[inline]
     fn available(&self, read: usize, write: usize) -> usize {
         if read > write {
             read - write - 1
@@ -231,6 +233,7 @@ impl Producer<'_> {
     /// Appends `data` to the buffer.
     ///
     /// If there is not enough space, the last bytes are silently discarded.
+    #[inline]
     pub fn write(&mut self, data: &[u8]) {
         // Relaxed: stale `read` is safe (underestimates available space).
         let read = self.header.read.load(Ordering::Relaxed);
@@ -305,6 +308,7 @@ impl Producer<'_> {
 
 impl Consumer<'_> {
     /// Returns `true` if there is no data available to read.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         // Acquire: synchronizes with producer's Release store to see written data.
         let write = self.header.write.load(Ordering::Acquire);
@@ -319,6 +323,7 @@ impl Consumer<'_> {
     /// If the data available to read crosses the end of the ring, this
     /// function may provide a smaller slice. Only after releasing the data
     /// up to the end of the ring will the next call provide more data.
+    #[inline]
     #[must_use]
     pub fn read(&mut self) -> GrantR<'_, '_> {
         // Acquire: synchronizes with producer's Release store, ensuring we see the written data.
@@ -403,6 +408,7 @@ impl<'a, 'c> GrantR<'a, 'c> {
     /// Finish the read, marking `used` elements as used
     ///
     /// This frees up the `used` space for future writes.
+    #[inline]
     pub fn release(self, used: usize) {
         let used = used.min(self.slice.len());
         // Non-atomic read-modify-write is ok here because there can
@@ -422,12 +428,14 @@ impl<'a, 'c> GrantR<'a, 'c> {
     /// Finish the read, marking all bytes as used.
     ///
     /// This is equivalent to `grant.release(grant.buf().len())`.
+    #[inline]
     pub fn release_all(self) {
         let len = self.slice.len();
         self.release(len);
     }
 
     /// Returns the bytes that this grant is allowed to read.
+    #[inline]
     pub fn buf(&self) -> &[u8] {
         self.slice
     }

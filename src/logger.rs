@@ -44,6 +44,7 @@ impl LoggerState {
     /// # Safety
     ///
     /// Must be called from within a critical section to prevent aliasing of `producer`.
+    #[inline]
     unsafe fn write(&self, bytes: &[u8]) {
         // Acquire: synchronizes with the Release store in `initialize`, ensuring we see
         // the fully initialized `producer`.
