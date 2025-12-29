@@ -43,20 +43,26 @@ __defmt_persist_start = ORIGIN(DEFMT_PERSIST);
 __defmt_persist_end   = ORIGIN(DEFMT_PERSIST) + LENGTH(DEFMT_PERSIST);
 ```
 
-Then call `init` early in your program and use the returned `Consumer` to read and transmit
-buffered logs:
+Then call `init` early in your program:
 
 ```rust,ignore
 let Ok(mut consumer) = defmt_persist::init() else {
     panic!("init failed");
 };
+```
 
+Use the returned `Consumer` to read and transmit buffered logs:
+
+```rust
+# fn transmit(_: &[u8]) -> usize { 0 }
+# fn example(mut consumer: defmt_persist::Consumer<'_>) {
 // Drain any persisted logs from before the reset
 while !consumer.is_empty() {
     let grant = consumer.read();
     let len = transmit(grant.buf()); // It's OK to not empty the entire grant, data is not lost
     grant.release(len);
 }
+# }
 ```
 
 ## Panic Handler
@@ -80,7 +86,7 @@ complete example.
 
 If your system uses a bootloader, the bootloader's linker script must also reserve/don't touch
 the same memory region. Otherwise, the bootloader may use this memory for its stack or heap,
-corrupting the persisted logs before the application starts.  The bootloader can also call
+corrupting the persisted logs before the application starts. The bootloader can also call
 `init` to read and transmit persisted logs from the application before launching it.
 
 ## Features
