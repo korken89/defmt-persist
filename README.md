@@ -82,6 +82,9 @@ After reset, the panic message will be available in the persist buffer and can b
 the `Consumer` from `init()`. See [`panic_test.rs`](testsuite/examples/panic_test.rs) for a
 complete example.
 
+Alternatively, [`panic-probe`](https://crates.io/crates/panic-probe) can be used for
+hardfault-on-panic behavior.
+
 ## Bootloader Considerations
 
 If your system uses a bootloader, the bootloader's linker script must also reserve/don't touch
