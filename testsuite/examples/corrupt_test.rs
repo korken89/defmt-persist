@@ -16,18 +16,12 @@ use testsuite::{drain_to_uart, dump_persist_region, entry, exit_failure, exit_su
 fn main() -> ! {
     let mut consumer = defmt_persist::init().unwrap();
 
-    // Check if there's any data (indicates recovered buffer).
-    let first_read = consumer.read();
-    let has_data = !first_read.buf().is_empty();
-
-    if has_data {
+    if !consumer.is_empty() {
         // Phase 3: Buffer was recovered - output what we got.
         // (This happens when valid snapshot is loaded)
-        first_read.release(0);
         drain_to_uart(&mut consumer);
     } else {
         // Phase 1 or 2: Buffer is empty (fresh init or corruption detected).
-        first_read.release(0);
 
         // Write test logs.
         defmt::info!("corrupt test: fresh buffer");

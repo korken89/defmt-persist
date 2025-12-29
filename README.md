@@ -52,13 +52,9 @@ let Ok(mut consumer) = defmt_persist::init() else {
 };
 
 // Drain any persisted logs from before the reset
-loop {
+while !consumer.is_empty() {
     let grant = consumer.read();
-    if grant.buf().is_empty() {
-        break;
-    }
-    transmit(grant.buf());
-    let len = grant.buf().len();
+    let len = transmit(grant.buf()); // It's OK to not empty the entire grant, data is not lost
     grant.release(len);
 }
 ```

@@ -24,13 +24,10 @@ pub fn exit_failure() -> ! {
 
 /// Drain all available data from the consumer and send via UART0.
 pub fn drain_to_uart(consumer: &mut Consumer<'_>) {
-    loop {
+    while !consumer.is_empty() {
         let data = consumer.read();
-        if data.buf().is_empty() {
-            break;
-        }
         uart::write_bytes(data.buf());
-        data.release(0xffffffff);
+        data.release_all();
     }
 }
 

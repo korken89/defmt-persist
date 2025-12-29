@@ -1,4 +1,4 @@
 [INFO ] Some text before a panic.
-[ERROR] panicked at testsuite/examples/panic_test.rs:40:9:
+[ERROR] panicked at testsuite/examples/panic_test.rs:32:9:
 Hello from panic message!
 [INFO ] Some text during second run after a panic.

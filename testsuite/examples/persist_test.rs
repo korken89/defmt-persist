@@ -15,18 +15,12 @@ use testsuite::{drain_to_uart, dump_persist_region, entry, exit_failure, exit_su
 fn main() -> ! {
     let mut consumer = defmt_persist::init().unwrap();
 
-    // Check if there's any data to read (indicates recovered buffer).
-    let first_read = consumer.read();
-    let has_data = !first_read.buf().is_empty();
-
-    if has_data {
+    if !consumer.is_empty() {
         // Phase 2: Read recovered logs and output via UART0.
-        first_read.release(0);
         drain_to_uart(&mut consumer);
         exit_success();
     } else {
         // Phase 1: Write logs, dump persist region, then read logs.
-        first_read.release(0);
 
         // Test all log levels
         defmt::println!("println: Hello from defmt-persist!");

@@ -304,7 +304,8 @@ impl Producer<'_> {
 }
 
 impl Consumer<'_> {
-    fn is_empty(&self) -> bool {
+    /// Returns `true` if there is no data available to read.
+    pub fn is_empty(&self) -> bool {
         // Acquire: synchronizes with producer's Release store to see written data.
         let write = self.header.write.load(Ordering::Acquire);
         // Relaxed: consumer owns `read`, no cross-thread synchronization needed.
@@ -416,6 +417,14 @@ impl<'a, 'c> GrantR<'a, 'c> {
         // Flush ECC write buffer.
         #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
         self.consumer.header._pad_read.store(0, Ordering::Relaxed);
+    }
+
+    /// Finish the read, marking all bytes as used.
+    ///
+    /// This is equivalent to `grant.release(grant.buf().len())`.
+    pub fn release_all(self) {
+        let len = self.slice.len();
+        self.release(len);
     }
 
     /// Returns the bytes that this grant is allowed to read.
