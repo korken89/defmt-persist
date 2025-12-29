@@ -16,6 +16,7 @@ fn main() -> ! {
     let mut consumer = defmt_persist::init().unwrap();
 
     if !consumer.is_empty() {
+        defmt::info!("This message will only be in the second run!");
         // Phase 2: Read recovered logs and output via UART0.
         drain_to_uart(&mut consumer);
         exit_success();
@@ -32,6 +33,8 @@ fn main() -> ! {
 
         // Dump persist region via UART1 BEFORE reading (reading consumes the data).
         dump_persist_region();
+
+        defmt::info!("This message will only be in the first run!");
 
         // Read all written logs and send via UART0 (for comparison with Phase 2).
         drain_to_uart(&mut consumer);

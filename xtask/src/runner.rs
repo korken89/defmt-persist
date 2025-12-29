@@ -188,7 +188,7 @@ fn run_persist(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Result<b
     }
 
     // Compare combined output (phase1 + phase2) against expected.
-    let combined = format!("{phase1_uart0}{phase2_uart0}");
+    let combined = format!("=== Run 1 ===\n{phase1_uart0}\n=== Run 2 ===\n{phase2_uart0}");
     compare_expected(example, &combined, opts)
 }
 

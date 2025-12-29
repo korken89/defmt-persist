@@ -26,9 +26,10 @@ fn main() -> ! {
         exit_success();
     } else {
         // Phase 1: Write logs, dump persist region, then read logs.
+        defmt::info!("Some text before a panic, that had time to drain.");
+        drain_to_uart(&mut consumer);
 
-        defmt::info!("Some text before a panic.");
-
+        defmt::info!("Some text before a panic, that did NOT have time to drain before panic.");
         panic!("Hello from panic message!");
     }
 }

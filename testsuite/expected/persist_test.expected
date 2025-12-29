@@ -1,12 +1,17 @@
+=== Run 1 ===
 [PRINT] println: Hello from defmt-persist!
 [ERROR] error: This is an error message
 [WARN ] warn: This is a warning message
 [INFO ] info: This is an info message
 [DEBUG] debug: This is a debug message
 [TRACE] trace: This is a trace message
+[INFO ] This message will only be in the first run!
+
+=== Run 2 ===
 [PRINT] println: Hello from defmt-persist!
 [ERROR] error: This is an error message
 [WARN ] warn: This is a warning message
 [INFO ] info: This is an info message
 [DEBUG] debug: This is a debug message
 [TRACE] trace: This is a trace message
+[INFO ] This message will only be in the second run!

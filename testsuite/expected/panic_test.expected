@@ -1,4 +1,8 @@
-[INFO ] Some text before a panic.
-[ERROR] panicked at testsuite/examples/panic_test.rs:32:9:
+=== Run 1 ===
+[INFO ] Some text before a panic, that had time to drain.
+
+=== Run 2 ===
+[INFO ] Some text before a panic, that did NOT have time to drain before panic.
+[ERROR] panicked at testsuite/examples/panic_test.rs:33:9:
 Hello from panic message!
 [INFO ] Some text during second run after a panic.
