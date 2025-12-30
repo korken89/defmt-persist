@@ -8,7 +8,7 @@ use tempfile::NamedTempFile;
 
 use crate::defmt;
 use crate::qemu::{MemoryLoad, run_qemu};
-use crate::runner::{PERSIST_ADDR, RunOptions};
+use crate::runner::{FAIL, PASS, PERSIST_ADDR, RunOptions};
 
 /// Corruption scenario flags.
 #[derive(Debug, Clone, Copy)]
@@ -137,7 +137,7 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
     }
 
     if phase1.uart1.is_empty() {
-        println!("  FAIL: no persist region captured in phase 1");
+        println!("  {FAIL}: no persist region captured in phase 1");
         return Ok(false);
     }
 
@@ -183,10 +183,10 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
         let passed = if flags.any() {
             // Any corruption should result in fresh path (semihosting has output).
             if !result_semihosting.is_empty() && result_uart0 == phase1_uart0 {
-                println!("    PASS: buffer reinitialized");
+                println!("    {PASS}: buffer reinitialized");
                 true
             } else {
-                println!("    FAIL: expected fresh path");
+                println!("    {FAIL}: expected fresh path");
                 println!("    --- semihosting ---");
                 print!("{result_semihosting}");
                 println!("    --- uart ---");
@@ -196,10 +196,10 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
         } else {
             // No corruption: recovery path taken (semihosting empty, UART has recovered data).
             if result_semihosting.is_empty() && !result_uart0.is_empty() {
-                println!("    PASS: recovered data");
+                println!("    {PASS}: recovered data");
                 true
             } else {
-                println!("    FAIL: expected recovery path");
+                println!("    {FAIL}: expected recovery path");
                 println!("    --- semihosting ---");
                 print!("{result_semihosting}");
                 println!("    --- uart ---");
@@ -214,9 +214,9 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
     }
 
     if all_passed {
-        println!("  PASS: all {} scenarios passed", scenarios.len());
+        println!("  {PASS}: all {} scenarios passed", scenarios.len());
     } else {
-        println!("  FAIL: some scenarios failed");
+        println!("  {FAIL}: some scenarios failed");
     }
 
     Ok(all_passed)

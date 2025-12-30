@@ -11,6 +11,10 @@ use crate::corrupt::run_corrupt;
 use crate::defmt;
 use crate::qemu::{MemoryLoad, run_qemu};
 
+// Colored status strings
+pub const PASS: &str = "\x1b[32mPASS\x1b[0m";
+pub const FAIL: &str = "\x1b[31mFAIL\x1b[0m";
+
 /// Address of the persist region in memory.
 pub const PERSIST_ADDR: u32 = 0x2000_FC00;
 
@@ -124,7 +128,7 @@ fn run_single(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Result<bo
 
     // Verify semihosting == uart0.
     if semihosting != uart0 {
-        println!("  FAIL: semihosting and UART output differ");
+        println!("  {FAIL}: semihosting and UART output differ");
         println!("--- semihosting ---");
         print!("{semihosting}");
         println!("--- uart ---");
@@ -153,7 +157,7 @@ fn run_persist(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Result<b
     }
 
     if phase1.uart1.is_empty() {
-        println!("  FAIL: no persist region captured in phase 1");
+        println!("  {FAIL}: no persist region captured in phase 1");
         return Ok(false);
     }
 
@@ -220,10 +224,10 @@ fn compare_expected(example: &str, output: &str, opts: &RunOptions) -> Result<bo
     } else if expected_path.exists() {
         let expected = fs::read_to_string(&expected_path)?;
         if output == expected {
-            println!("  PASS");
+            println!("  {PASS}");
             Ok(true)
         } else {
-            println!("  FAIL: output differs from expected");
+            println!("  {FAIL}: output differs from expected");
             println!("--- expected ---");
             print!("{expected}");
             println!("--- actual ---");
