@@ -178,7 +178,6 @@ impl RingBuffer {
                     v.write.store(0, Ordering::Relaxed);
                 }
             };
-            // Flush ECC write buffers for both fields unconditionally.
             #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
             v._pad_read.store(0, Ordering::Relaxed);
             #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
@@ -240,7 +239,6 @@ impl Producer<'_> {
         // Relaxed: producer owns `write`, no cross-thread synchronization needed.
         let write = self.header.write.load(Ordering::Relaxed);
         let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
-        // Data that will fit in the buffer.
         let len = data.len().min(self.available(read, write));
 
         // There are `ptr::copy_nonoverlapping` and `pointer::add` calls below.
@@ -295,12 +293,9 @@ impl Producer<'_> {
             unsafe { ptr::copy_nonoverlapping(data.as_ptr(), buf.add(write), len) };
         }
 
-        // Update the write pointer so the consumer sees the new data.
-        // The modulo ensures the invariant write < buf.len() is maintained.
         self.header
             .write
             .store(write.wrapping_add(len) % self.buf.len(), Ordering::Release);
-        // Flush ECC write buffer.
         #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
         self.header._pad_write.store(0, Ordering::Relaxed);
     }
@@ -420,7 +415,6 @@ impl<'a, 'c> GrantR<'a, 'c> {
             0
         };
         self.consumer.header.read.store(new_read, Ordering::Release);
-        // Flush ECC write buffer.
         #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
         self.consumer.header._pad_read.store(0, Ordering::Relaxed);
     }

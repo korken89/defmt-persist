@@ -126,7 +126,6 @@ unsafe impl defmt::Logger for Logger {
     }
 
     unsafe fn flush() {
-        // Skip if reentrant (depth != 1).
         if LOGGER_STATE.depth.load(Ordering::Relaxed) != 1 {
             return;
         }
@@ -139,7 +138,6 @@ unsafe impl defmt::Logger for Logger {
     }
 
     unsafe fn release() {
-        // Decrement depth. If we weren't at 1, we're reentrant and skip all cleanup.
         let was_depth = LOGGER_STATE.depth.fetch_sub(1, Ordering::Release);
         if was_depth != 1 {
             return;
@@ -162,7 +160,6 @@ unsafe impl defmt::Logger for Logger {
     }
 
     unsafe fn write(bytes: &[u8]) {
-        // Skip if reentrant (depth != 1). The reentrant log is silently dropped.
         if LOGGER_STATE.depth.load(Ordering::Relaxed) != 1 {
             return;
         }

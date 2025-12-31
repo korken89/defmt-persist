@@ -17,19 +17,12 @@ fn main() -> ! {
     let mut consumer = defmt_persist::init().unwrap();
 
     if !consumer.is_empty() {
-        // Phase 3: Buffer was recovered - output what we got.
-        // (This happens when valid snapshot is loaded)
+        // Phase 3: Buffer was recovered (valid snapshot loaded).
         drain_to_uart(&mut consumer);
     } else {
         // Phase 1 or 2: Buffer is empty (fresh init or corruption detected).
-
-        // Write test logs.
         defmt::info!("corrupt test: fresh buffer");
-
-        // Dump persist region via UART1.
         dump_persist_region();
-
-        // Output logs via UART0.
         drain_to_uart(&mut consumer);
     }
 

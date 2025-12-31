@@ -64,14 +64,12 @@ pub fn init() -> Result<Consumer<'static>, InitError> {
     let end = (&raw const __defmt_persist_end).expose_provenance();
     let memory = start..end;
 
-    // Validate alignment and size requirements.
     if !memory.start.is_multiple_of(align_of::<RingBuffer>()) {
         return Err(InitError::BadAlignment);
     }
     if memory.len() <= size_of::<RingBuffer>() {
         return Err(InitError::TooSmall);
     }
-    // Ensure buffer size doesn't overflow pointer arithmetic.
     let buf_len = memory.len() - size_of::<RingBuffer>();
     if buf_len >= isize::MAX as usize / 4 {
         return Err(InitError::TooLarge);

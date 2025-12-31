@@ -99,7 +99,6 @@ pub fn run_example(example: &str, opts: &RunOptions) -> Result<bool> {
     println!("Building '{example}'...");
     let elf_path = build_example(example, opts.release)?;
 
-    // Special case for corruption tests.
     if config.validate_mode == ValidateMode::Corrupt {
         return run_corrupt(&elf_path, opts);
     }
@@ -126,7 +125,6 @@ fn run_single(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Result<bo
         return Ok(true);
     }
 
-    // Verify semihosting == uart0.
     if semihosting != uart0 {
         println!("  {FAIL}: semihosting and UART output differ");
         println!("--- semihosting ---");
@@ -136,7 +134,6 @@ fn run_single(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Result<bo
         return Ok(false);
     }
 
-    // Compare against expected file.
     compare_expected(example, &semihosting, opts)
 }
 
@@ -191,7 +188,6 @@ fn run_persist(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Result<b
         println!("--- Phase 2 end ---\n");
     }
 
-    // Compare combined output (phase1 + phase2) against expected.
     let combined = format!("=== Run 1 ===\n{phase1_uart0}\n=== Run 2 ===\n{phase2_uart0}");
     compare_expected(example, &combined, opts)
 }

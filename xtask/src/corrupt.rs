@@ -148,7 +148,6 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
         );
     }
 
-    // Test all 8 combinations of corruption.
     let scenarios = CorruptFlags::all_combinations();
 
     let snapshot_file = NamedTempFile::new().context("Failed to create snapshot file")?;
@@ -177,11 +176,9 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
             print!("{result_uart0}");
         }
 
-        // Check expected behavior using semihosting output:
-        // - No corruption: recovery path taken, semihosting empty (no defmt::info!() called).
-        // - Any corruption: fresh path taken, semihosting has "fresh buffer" message.
+        // No corruption: recovery path (semihosting empty).
+        // Any corruption: fresh path (semihosting has "fresh buffer" message).
         let passed = if flags.any() {
-            // Any corruption should result in fresh path (semihosting has output).
             if !result_semihosting.is_empty() && result_uart0 == phase1_uart0 {
                 println!("    {PASS}: buffer reinitialized");
                 true
@@ -194,7 +191,6 @@ pub fn run_corrupt(elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
                 false
             }
         } else {
-            // No corruption: recovery path taken (semihosting empty, UART has recovered data).
             if result_semihosting.is_empty() && !result_uart0.is_empty() {
                 println!("    {PASS}: recovered data");
                 true
