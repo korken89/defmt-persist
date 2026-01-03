@@ -161,11 +161,17 @@ impl RingBuffer {
         if unsafe { header.read_volatile() } != MAGIC {
             v.read.store(0, Ordering::Relaxed);
             #[cfg(feature = "ecc-64bit")]
-            v._pad_read.store(0, Ordering::Relaxed);
+            // SAFETY: Pointer is valid and aligned, from our own field.
+            unsafe {
+                v._pad_read.as_ptr().write_volatile(0)
+            };
             // The intermediate state doesn't matter until header == MAGIC
             v.write.store(0, Ordering::Relaxed);
             #[cfg(feature = "ecc-64bit")]
-            v._pad_write.store(0, Ordering::Relaxed);
+            // SAFETY: Pointer is valid and aligned, from our own field.
+            unsafe {
+                v._pad_write.as_ptr().write_volatile(0)
+            };
 
             fence(Ordering::SeqCst);
             // SAFETY: A regular assignment to v.header would be safe
@@ -196,9 +202,15 @@ impl RingBuffer {
                 }
             };
             #[cfg(feature = "ecc-64bit")]
-            v._pad_read.store(0, Ordering::Relaxed);
+            // SAFETY: Pointer is valid and aligned, from our own field.
+            unsafe {
+                v._pad_read.as_ptr().write_volatile(0)
+            };
             #[cfg(feature = "ecc-64bit")]
-            v._pad_write.store(0, Ordering::Relaxed);
+            // SAFETY: Pointer is valid and aligned, from our own field.
+            unsafe {
+                v._pad_write.as_ptr().write_volatile(0)
+            };
         }
         fence(Ordering::SeqCst);
 
@@ -315,7 +327,10 @@ impl Producer<'_> {
             Ordering::Release,
         );
         #[cfg(feature = "ecc-64bit")]
-        self.header._pad_write.store(0, Ordering::Relaxed);
+        // SAFETY: Pointer is valid and aligned, from our own field.
+        unsafe {
+            self.header._pad_write.as_ptr().write_volatile(0)
+        };
     }
 }
 
@@ -437,7 +452,10 @@ impl<'a, 'c> GrantR<'a, 'c> {
             .read
             .store(new_read as u32, Ordering::Release);
         #[cfg(feature = "ecc-64bit")]
-        self.consumer.header._pad_read.store(0, Ordering::Relaxed);
+        // SAFETY: Pointer is valid and aligned, from our own field.
+        unsafe {
+            self.consumer.header._pad_read.as_ptr().write_volatile(0)
+        };
     }
 
     /// Finish the read, marking all bytes as used.
