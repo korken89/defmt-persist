@@ -5,7 +5,7 @@ use core::{
     mem::MaybeUninit,
     ops::Range,
     ptr, slice,
-    sync::atomic::{AtomicUsize, Ordering, fence},
+    sync::atomic::{AtomicU32, Ordering, fence},
 };
 
 /// A single-producer, single-consumer (SPSC) lock-free queue storing up to `len-1` bytes.
@@ -36,19 +36,19 @@ pub struct RingBuffer {
     /// Where the next read starts.
     ///
     /// The RingBuffer always guarantees `read < len`.
-    read: AtomicUsize,
+    read: AtomicU32,
     /// Padding to ensure `read` occupies its own 64-bit ECC word.
     /// Written after `read` to flush the ECC write buffer.
-    #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
-    _pad_read: AtomicUsize,
+    #[cfg(feature = "ecc-64bit")]
+    _pad_read: AtomicU32,
     /// Where the next write starts.
     ///
     /// The RingBuffer always guarantees `write < len`.
-    write: AtomicUsize,
+    write: AtomicU32,
     /// Padding to ensure `write` occupies its own 64-bit ECC word.
     /// Written after `write` to flush the ECC write buffer.
-    #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
-    _pad_write: AtomicUsize,
+    #[cfg(feature = "ecc-64bit")]
+    _pad_write: AtomicU32,
 }
 
 /// Writes data into the buffer.
@@ -80,16 +80,17 @@ unsafe impl Send for Consumer<'_> {}
 ///
 /// Replace this if the layout or field semantics change in a backwards-incompatible way.
 /// The ECC-padded layout uses a different magic to force reinitialization when switching.
-#[cfg(not(all(feature = "ecc-64bit", target_pointer_width = "32")))]
+#[cfg(not(feature = "ecc-64bit"))]
 const MAGIC: u128 = 0xb528_c25f_90c6_16af_cbc1_502c_09c1_fd6e;
-#[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
+#[cfg(feature = "ecc-64bit")]
 const MAGIC: u128 = 0x1dff_2060_27b9_f2b4_a194_1013_69cd_3c6c;
 
 /// Field offsets for corruption testing.
 #[cfg(feature = "qemu-test")]
 pub mod offsets {
     use super::RingBuffer;
-    use core::mem::offset_of;
+    use core::mem::{offset_of, size_of};
+    use core::sync::atomic::AtomicU32;
 
     /// Offset of the header field.
     pub const HEADER: usize = offset_of!(RingBuffer, header);
@@ -97,21 +98,21 @@ pub mod offsets {
     pub const READ: usize = offset_of!(RingBuffer, read);
     /// Offset of the write index field.
     pub const WRITE: usize = offset_of!(RingBuffer, write);
-    /// Size of an index field on 32-bit targets.
-    pub const INDEX_SIZE: usize = 4;
+    /// Size of an index field.
+    pub const INDEX_SIZE: usize = size_of::<AtomicU32>();
 }
 
 impl RingBuffer {
     #[cfg(test)]
-    pub(crate) fn new(read: usize, write: usize) -> Self {
+    pub(crate) fn new(read: u32, write: u32) -> Self {
         RingBuffer {
             header: MAGIC,
-            read: AtomicUsize::new(read),
-            write: AtomicUsize::new(write),
-            #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
-            _pad_read: AtomicUsize::new(0),
-            #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
-            _pad_write: AtomicUsize::new(0),
+            read: AtomicU32::new(read),
+            write: AtomicU32::new(write),
+            #[cfg(feature = "ecc-64bit")]
+            _pad_read: AtomicU32::new(0),
+            #[cfg(feature = "ecc-64bit")]
+            _pad_write: AtomicU32::new(0),
         }
     }
     /// Creates a `RingBuffer` or recovers previous state if available.
@@ -121,7 +122,7 @@ impl RingBuffer {
     /// - `memory.start` must be aligned to `align_of::<RingBuffer>()`.
     /// - `memory.len()` must be greater than `size_of::<RingBuffer>()`.
     /// - Buffer size (`memory.len() - size_of::<RingBuffer>()`) must be less than
-    ///   `isize::MAX / 4` to avoid overflow in pointer arithmetic.
+    ///   `i32::MAX / 4` to avoid overflow in pointer arithmetic.
     /// - This takes logical ownership of the provided `memory` for the
     ///   `'static` lifetime. Make sure that any previous owner is no longer
     ///   live, for example by only ever having one application running at a
@@ -145,7 +146,7 @@ impl RingBuffer {
         // SAFETY:
         // - Alignment is guaranteed by the caller.
         // - Size is guaranteed by the caller.
-        // - All fields (`u128`, `AtomicUsize`, `[UnsafeCell<MaybeUninit<u8>>, X]`)
+        // - All fields (`u128`, `AtomicU32`, `[UnsafeCell<MaybeUninit<u8>>, X]`)
         //   are valid for any bit pattern, so interpreting the raw memory as this
         //   type and buffer is sound. As the memory is initialized outside the Rust abstract
         //   machine (of the running program), we consider the caveats of non-fixed
@@ -159,11 +160,11 @@ impl RingBuffer {
         // optimizsed away.
         if unsafe { header.read_volatile() } != MAGIC {
             v.read.store(0, Ordering::Relaxed);
-            #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
+            #[cfg(feature = "ecc-64bit")]
             v._pad_read.store(0, Ordering::Relaxed);
             // The intermediate state doesn't matter until header == MAGIC
             v.write.store(0, Ordering::Relaxed);
-            #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
+            #[cfg(feature = "ecc-64bit")]
             v._pad_write.store(0, Ordering::Relaxed);
 
             fence(Ordering::SeqCst);
@@ -175,8 +176,8 @@ impl RingBuffer {
         } else {
             // The header promised to keep the contract, but we don't
             // trust it for the safety of our pointer offsets.
-            let write = v.write.load(Ordering::Relaxed);
-            let read = v.read.load(Ordering::Relaxed);
+            let write = v.write.load(Ordering::Relaxed) as usize;
+            let read = v.read.load(Ordering::Relaxed) as usize;
             let read_ok = read < buf_len;
             let write_ok = write < buf_len;
             // Since `header` is already marked as valid, some extra care
@@ -186,17 +187,17 @@ impl RingBuffer {
             // appears valid and non-empty.
             match (read_ok, write_ok) {
                 (true, true) => {}
-                (true, false) => v.write.store(read, Ordering::Relaxed),
-                (false, true) => v.read.store(write, Ordering::Relaxed),
+                (true, false) => v.write.store(read as u32, Ordering::Relaxed),
+                (false, true) => v.read.store(write as u32, Ordering::Relaxed),
                 (false, false) => {
                     v.read.store(0, Ordering::Relaxed);
                     // write is still invalid between these operations
                     v.write.store(0, Ordering::Relaxed);
                 }
             };
-            #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
+            #[cfg(feature = "ecc-64bit")]
             v._pad_read.store(0, Ordering::Relaxed);
-            #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
+            #[cfg(feature = "ecc-64bit")]
             v._pad_write.store(0, Ordering::Relaxed);
         }
         fence(Ordering::SeqCst);
@@ -213,7 +214,7 @@ impl RingBuffer {
             )
         };
 
-        // SAFETY: The caller guarantees buf.len() < isize::MAX / 4.
+        // SAFETY: The caller guarantees buf.len() < i32::MAX / 4.
         unsafe { v.split(buf) }
     }
 
@@ -221,7 +222,7 @@ impl RingBuffer {
     ///
     /// # Safety
     ///
-    /// `buf.len()` must be less than `isize::MAX / 4` to avoid overflow in pointer arithmetic.
+    /// `buf.len()` must be less than `i32::MAX / 4` to avoid overflow in pointer arithmetic.
     #[inline]
     pub const unsafe fn split<'a>(
         &'a mut self,
@@ -251,9 +252,9 @@ impl Producer<'_> {
     #[inline]
     pub fn write(&mut self, data: &[u8]) {
         // Relaxed: stale `read` is safe (underestimates available space).
-        let read = self.header.read.load(Ordering::Relaxed);
+        let read = self.header.read.load(Ordering::Relaxed) as usize;
         // Relaxed: producer owns `write`, no cross-thread synchronization needed.
-        let write = self.header.write.load(Ordering::Relaxed);
+        let write = self.header.write.load(Ordering::Relaxed) as usize;
         let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
         let len = data.len().min(self.available(read, write));
 
@@ -269,7 +270,7 @@ impl Producer<'_> {
         //
         // For `pointer::add`:
         // - offset in bytes fits in `isize`: `buf.len()` is checked in `split()` to be
-        //   < `isize::MAX / 4`, so all offsets fit.
+        //   < `i32::MAX / 4`, so all offsets fit.
         // - entire memory range inside the same allocation: we stay within `buf`, which is a
         //   single allocation.
         //
@@ -309,10 +310,11 @@ impl Producer<'_> {
             unsafe { ptr::copy_nonoverlapping(data.as_ptr(), buf.add(write), len) };
         }
 
-        self.header
-            .write
-            .store(write.wrapping_add(len) % self.buf.len(), Ordering::Release);
-        #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
+        self.header.write.store(
+            (write.wrapping_add(len) % self.buf.len()) as u32,
+            Ordering::Release,
+        );
+        #[cfg(feature = "ecc-64bit")]
         self.header._pad_write.store(0, Ordering::Relaxed);
     }
 }
@@ -322,9 +324,9 @@ impl Consumer<'_> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         // Acquire: synchronizes with producer's Release store to see written data.
-        let write = self.header.write.load(Ordering::Acquire);
+        let write = self.header.write.load(Ordering::Acquire) as usize;
         // Relaxed: consumer owns `read`, no cross-thread synchronization needed.
-        let read = self.header.read.load(Ordering::Relaxed);
+        let read = self.header.read.load(Ordering::Relaxed) as usize;
 
         write == read
     }
@@ -338,9 +340,9 @@ impl Consumer<'_> {
     #[must_use]
     pub fn read(&mut self) -> GrantR<'_, '_> {
         // Acquire: synchronizes with producer's Release store, ensuring we see the written data.
-        let write = self.header.write.load(Ordering::Acquire);
+        let write = self.header.write.load(Ordering::Acquire) as usize;
         // Relaxed: consumer owns `read`, no cross-thread synchronization needed.
-        let read = self.header.read.load(Ordering::Relaxed);
+        let read = self.header.read.load(Ordering::Relaxed) as usize;
         let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
 
         let end = if write < read { self.buf.len() } else { write };
@@ -359,12 +361,12 @@ impl Consumer<'_> {
         //   `buf`, but the consumer owns this memory until the read pointer
         //   is updated. The read pointer is only updated in the function
         //   that drops the slice.
-        // - Total size in bytes < isize::MAX: we stay inside `buf`
+        // - Total size in bytes < i32::MAX: we stay inside `buf`
         //   and the check on `len` before constructing the `Consumer` ensures
         //   that no in-bounds buffer is too big.
         //
         // For `pointer::add`:
-        // - offset in bytes fits in `isize`: len fits, which is checked
+        // - offset in bytes fits in `isize`: buf.len() fits, which is checked
         //   before constructing a Consumer. write - read fits if write >= read,
         //   which holds in the cases we use it.
         // - entire memory range inside the same allocation: read < len, so the
@@ -430,8 +432,11 @@ impl<'a, 'c> GrantR<'a, 'c> {
         } else {
             0
         };
-        self.consumer.header.read.store(new_read, Ordering::Release);
-        #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
+        self.consumer
+            .header
+            .read
+            .store(new_read as u32, Ordering::Release);
+        #[cfg(feature = "ecc-64bit")]
         self.consumer.header._pad_read.store(0, Ordering::Relaxed);
     }
 
@@ -460,7 +465,7 @@ mod test {
     fn touching_no_boundaries() {
         let mut b = RingBuffer::new(1, 1);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
         let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 
@@ -475,7 +480,7 @@ mod test {
     fn fill_simple() {
         let mut b = RingBuffer::new(0, 0);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
         let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2, 3]);
 
@@ -490,7 +495,7 @@ mod test {
     fn fill_crossing_end() {
         let mut b = RingBuffer::new(2, 2);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
         let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2, 3]);
 
@@ -508,7 +513,7 @@ mod test {
     fn underfill_crossing_end() {
         let mut b = RingBuffer::new(3, 3);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
         let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 
@@ -526,7 +531,7 @@ mod test {
     fn overfill() {
         let mut b = RingBuffer::new(0, 0);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
         let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2, 3, 4, 5, 6, 7]);
 
@@ -541,7 +546,7 @@ mod test {
     fn stop_at_end() {
         let mut b = RingBuffer::new(2, 2);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
         let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 
@@ -554,13 +559,9 @@ mod test {
 
     #[test]
     fn stop_before_end() {
-        let mut b = RingBuffer {
-            header: MAGIC,
-            read: AtomicUsize::new(2),
-            write: AtomicUsize::new(2),
-        };
+        let mut b = RingBuffer::new(2, 2);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
         let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1]);
 
@@ -575,7 +576,7 @@ mod test {
     fn zero_release() {
         let mut b = RingBuffer::new(2, 2);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
         let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 
@@ -590,7 +591,7 @@ mod test {
     fn partial_release() {
         let mut b = RingBuffer::new(2, 2);
         let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under isize::MAX / 4.
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
         let (mut p, mut c) = unsafe { b.split(buf) };
         p.write(&[1, 2]);
 

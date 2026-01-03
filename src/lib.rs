@@ -73,7 +73,7 @@ pub fn init() -> Result<Consumer<'static>, InitError> {
         return Err(InitError::TooSmall);
     }
     let buf_len = memory.len() - size_of::<RingBuffer>();
-    if buf_len >= isize::MAX as usize / 4 {
+    if buf_len >= i32::MAX as usize / 4 {
         return Err(InitError::TooLarge);
     }
 
