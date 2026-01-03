@@ -85,6 +85,22 @@ const MAGIC: u128 = 0xb528_c25f_90c6_16af_cbc1_502c_09c1_fd6e;
 #[cfg(all(feature = "ecc-64bit", target_pointer_width = "32"))]
 const MAGIC: u128 = 0x1dff_2060_27b9_f2b4_a194_1013_69cd_3c6c;
 
+/// Field offsets for corruption testing.
+#[cfg(feature = "qemu-test")]
+pub mod offsets {
+    use super::RingBuffer;
+    use core::mem::offset_of;
+
+    /// Offset of the header field.
+    pub const HEADER: usize = offset_of!(RingBuffer, header);
+    /// Offset of the read index field.
+    pub const READ: usize = offset_of!(RingBuffer, read);
+    /// Offset of the write index field.
+    pub const WRITE: usize = offset_of!(RingBuffer, write);
+    /// Size of an index field on 32-bit targets.
+    pub const INDEX_SIZE: usize = 4;
+}
+
 impl RingBuffer {
     #[cfg(test)]
     pub(crate) fn new(read: usize, write: usize) -> Self {

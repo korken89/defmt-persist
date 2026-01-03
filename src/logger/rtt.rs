@@ -156,12 +156,10 @@ impl Channel {
             return 0;
         }
 
-        // Calculate how much space is left in the buffer.
         let read = self.read.load(Ordering::Relaxed);
         let write = self.write.load(Ordering::Acquire);
         let available = available_buffer_size(read, write);
 
-        // Abort if buffer is full.
         if available == 0 {
             return 0;
         }
@@ -202,21 +200,17 @@ impl Channel {
             unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), buf.add(cursor), len) };
         }
 
-        // Adjust the write pointer, so the host knows that there is new data.
         self.write
             .store(cursor.wrapping_add(len) % BUF_SIZE, Ordering::Release);
 
-        // Return the number of bytes written.
         len
     }
 
     fn flush(&self) {
-        // Return early, if host is disconnected.
         if !self.host_is_connected() {
             return;
         }
 
-        // Busy wait, until the read- catches up with the write-pointer.
         let read = || self.read.load(Ordering::Relaxed);
         let write = || self.write.load(Ordering::Relaxed);
         while read() != write() {}

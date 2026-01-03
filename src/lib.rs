@@ -5,6 +5,8 @@
 use core::mem::{align_of, size_of};
 use core::sync::atomic::{AtomicBool, Ordering};
 use ring_buffer::RingBuffer;
+#[cfg(feature = "qemu-test")]
+pub use ring_buffer::offsets;
 pub use ring_buffer::{Consumer, GrantR};
 
 #[cfg(feature = "async-await")]

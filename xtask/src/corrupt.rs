@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use defmt_persist::offsets;
 use tempfile::NamedTempFile;
 
 use crate::defmt;
@@ -90,29 +91,21 @@ impl CorruptFlags {
 }
 
 /// Apply corruption to a snapshot based on flags.
-///
-/// Layout (32-bit with ECC padding):
-/// - bytes 0-15: header (u128 magic)
-/// - bytes 16-19: read index (usize)
-/// - bytes 20-23: _pad_read
-/// - bytes 24-27: write index (usize)
-/// - bytes 28-31: _pad_write
 fn apply_corruption(snapshot: &[u8], flags: CorruptFlags) -> Vec<u8> {
     let mut corrupted = snapshot.to_vec();
 
     if flags.header {
-        // Zero a magic byte.
-        corrupted[0] = 0;
+        corrupted[offsets::HEADER] = 0;
     }
 
     if flags.read {
-        // Set read index to invalid value.
-        corrupted[19] = 0xff;
+        // Corrupt high byte to make index invalid (> buffer size).
+        corrupted[offsets::READ + offsets::INDEX_SIZE - 1] = 0xff;
     }
 
     if flags.write {
-        // Set write index to invalid value.
-        corrupted[27] = 0xff;
+        // Corrupt high byte to make index invalid (> buffer size).
+        corrupted[offsets::WRITE + offsets::INDEX_SIZE - 1] = 0xff;
     }
 
     corrupted
