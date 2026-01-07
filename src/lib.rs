@@ -69,6 +69,18 @@ pub fn init() -> Result<Consumer<'static>, InitError> {
     if !memory.start.is_multiple_of(align_of::<RingBuffer>()) {
         return Err(InitError::BadAlignment);
     }
+    #[cfg(feature = "ecc-64bit")]
+    {
+        const {
+            assert!(
+                size_of::<RingBuffer>().is_multiple_of(8),
+                "RingBuffer size must be a multiple of 8 for ecc-64bit alignment"
+            );
+        }
+        if !memory.start.is_multiple_of(8) || !memory.end.is_multiple_of(8) {
+            return Err(InitError::BadAlignment);
+        }
+    }
     if memory.len() <= size_of::<RingBuffer>() {
         return Err(InitError::TooSmall);
     }
@@ -77,9 +89,12 @@ pub fn init() -> Result<Consumer<'static>, InitError> {
         return Err(InitError::TooLarge);
     }
 
-    // SAFETY: Linker symbols provide the memory region. The atomic swap above
-    // guarantees this code runs exactly once, ensuring exclusive ownership.
-    // Alignment and size are validated above.
+    // SAFETY:
+    // - Linker symbols provide the memory region.
+    // - The atomic swap above guarantees this code runs exactly once, ensuring exclusive ownership.
+    // - Alignment and size are validated above.
+    // - With `ecc-64bit`: linker-provided memory is outside the compiler's abstract machine,
+    //   so the 64-bit ECC flush reads have defined bit patterns (not compiler-visible `MaybeUninit`).
     let (p, c) = unsafe { RingBuffer::recover_or_reinitialize(memory) };
 
     // SAFETY: The atomic swap guarantees this is called only once.

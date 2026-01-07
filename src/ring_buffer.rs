@@ -122,6 +122,8 @@ impl RingBuffer {
     /// - `memory.len()` must be greater than `size_of::<RingBuffer>()`.
     /// - Buffer size (`memory.len() - size_of::<RingBuffer>()`) must be less than
     ///   `i32::MAX / 4` to avoid overflow in pointer arithmetic.
+    /// - With the `ecc-64bit` feature: both `memory.start` and `memory.end` must be
+    ///   8-byte aligned for the 64-bit volatile writes that flush the ECC cache.
     /// - This takes logical ownership of the provided `memory` for the
     ///   `'static` lifetime. Make sure that any previous owner is no longer
     ///   live, for example by only ever having one application running at a
@@ -225,7 +227,10 @@ impl RingBuffer {
             )
         };
 
-        // SAFETY: The caller guarantees buf.len() < i32::MAX / 4.
+        // SAFETY:
+        // - The caller guarantees `buf.len() < i32::MAX / 4`.
+        // - With `ecc-64bit`: the caller guarantees `memory.start` and `memory.end` are 8-byte aligned.
+        //   Since `size_of::<RingBuffer>()` is a multiple of 8, `buf` inherits this alignment.
         unsafe { v.split(buf) }
     }
 
@@ -233,7 +238,13 @@ impl RingBuffer {
     ///
     /// # Safety
     ///
-    /// `buf.len()` must be less than `i32::MAX / 4` to avoid overflow in pointer arithmetic.
+    /// - `buf.len()` must be less than `i32::MAX / 4` to avoid overflow in pointer arithmetic.
+    /// - With the `ecc-64bit` feature: `buf` must be 8-byte aligned at both start and end
+    ///   (i.e., `buf.as_ptr()` and `buf.as_ptr().add(buf.len())` must be 8-byte aligned).
+    ///   This is required for the 64-bit volatile writes that flush the ECC cache.
+    /// - With the `ecc-64bit` feature: `buf` must not be backed by local `MaybeUninit` memory,
+    ///   as the 64-bit read in the ECC flush could read uninitialized bytes that the compiler
+    ///   can reason about (UB). Use linker-provided memory or memory with a defined bit pattern.
     #[inline]
     pub const unsafe fn split<'a>(
         &'a mut self,
@@ -268,6 +279,9 @@ impl Producer<'_> {
         let write = self.header.write.load(Ordering::Relaxed) as usize;
         let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
         let len = data.len().min(self.available(read, write));
+        if len == 0 {
+            return;
+        }
 
         // There are `ptr::copy_nonoverlapping` and `pointer::add` calls below.
         // The common safety arguments are:
@@ -321,10 +335,27 @@ impl Producer<'_> {
             unsafe { ptr::copy_nonoverlapping(data.as_ptr(), buf.add(write), len) };
         }
 
-        self.header.write.store(
-            (write.wrapping_add(len) % self.buf.len()) as u32,
-            Ordering::Release,
-        );
+        let new_write = write.wrapping_add(len) % self.buf.len();
+
+        #[cfg(feature = "ecc-64bit")]
+        // Flush ECC cache for the 8-byte block containing the last written byte.
+        // This ensures data is committed to memory before the index update.
+        //
+        // SAFETY:
+        // - We just wrote to this address, so it's valid for access.
+        // - The contract of `RingBuffer::split` ensure the buffer is 8-byte aligned at both
+        //   start and end, so the aligned 64-bit access stays within the allocated region.
+        // - This does not cause data races with the `Consumer`: even if the aligned read-write
+        //   touches bytes owned by the Consumer, we only write back the same value we read,
+        //   and the Consumer never modifies those bytes, so no read-modify-write hazard exists.
+        unsafe {
+            let last_byte_pos = ((new_write + self.buf.len() - 1) % self.buf.len()) & !0x7;
+            let aligned_addr = buf.add(last_byte_pos) as *mut u64;
+            let val = aligned_addr.read();
+            aligned_addr.write_volatile(val);
+        }
+
+        self.header.write.store(new_write as u32, Ordering::Release);
         #[cfg(feature = "ecc-64bit")]
         // SAFETY: Pointer is valid and aligned, from our own field.
         unsafe {
@@ -508,12 +539,35 @@ mod test {
 
     use super::*;
 
+    /// Buffer size for tests. Must be at least 8 when `ecc-64bit` is enabled for proper alignment.
+    #[cfg(feature = "ecc-64bit")]
+    const BUF_SIZE: usize = 16;
+    #[cfg(not(feature = "ecc-64bit"))]
+    const BUF_SIZE: usize = 4;
+
+    /// 8-byte aligned buffer wrapper for tests.
+    ///
+    /// With `ecc-64bit`: `#[repr(align(8))]` ensures start is 8-byte aligned, and
+    /// `BUF_SIZE` (16) is a multiple of 8, so end is also 8-byte aligned.
+    #[repr(align(8))]
+    struct AlignedBuf([UnsafeCell<MaybeUninit<u8>>; BUF_SIZE]);
+
+    impl AlignedBuf {
+        const fn new() -> Self {
+            Self([const { UnsafeCell::new(MaybeUninit::new(0)) }; BUF_SIZE])
+        }
+
+        fn as_slice(&self) -> &[UnsafeCell<MaybeUninit<u8>>] {
+            &self.0
+        }
+    }
+
     #[test]
     fn touching_no_boundaries() {
         let mut b = RingBuffer::new(1, 1);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
+        let buf = AlignedBuf::new();
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -526,9 +580,9 @@ mod test {
     #[test]
     fn fill_simple() {
         let mut b = RingBuffer::new(0, 0);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
+        let buf = AlignedBuf::new();
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
         p.write(&[1, 2, 3]);
 
         let r = c.read();
@@ -540,10 +594,11 @@ mod test {
 
     #[test]
     fn fill_crossing_end() {
-        let mut b = RingBuffer::new(2, 2);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
+        let buf = AlignedBuf::new();
+        let start_pos = BUF_SIZE - 2;
+        let mut b = RingBuffer::new(start_pos as u32, start_pos as u32);
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
         p.write(&[1, 2, 3]);
 
         let r = c.read();
@@ -558,10 +613,11 @@ mod test {
 
     #[test]
     fn release_crossing_end() {
-        let mut b = RingBuffer::new(2, 2);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
+        let buf = AlignedBuf::new();
+        let start_pos = BUF_SIZE - 2;
+        let mut b = RingBuffer::new(start_pos as u32, start_pos as u32);
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
         p.write(&[1, 2, 3]);
 
         let r = c.read();
@@ -573,10 +629,11 @@ mod test {
 
     #[test]
     fn underfill_crossing_end() {
-        let mut b = RingBuffer::new(3, 3);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
+        let buf = AlignedBuf::new();
+        let start_pos = BUF_SIZE - 1;
+        let mut b = RingBuffer::new(start_pos as u32, start_pos as u32);
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -592,24 +649,27 @@ mod test {
     #[test]
     fn overfill() {
         let mut b = RingBuffer::new(0, 0);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
-        p.write(&[1, 2, 3, 4, 5, 6, 7]);
+        let buf = AlignedBuf::new();
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
+        // Write more than buffer can hold (BUF_SIZE - 1 is max capacity).
+        p.write(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
 
         let r = c.read();
-        assert_eq!(r.bufs(), (&[1, 2, 3][..], &[][..]));
-        r.release(3);
+        let (a, b) = r.bufs();
+        assert_eq!(a.len() + b.len(), BUF_SIZE - 1);
+        r.release(BUF_SIZE - 1);
         let r = c.read();
         assert_eq!(r.bufs(), (&[][..], &[][..]));
     }
 
     #[test]
     fn stop_at_end() {
-        let mut b = RingBuffer::new(2, 2);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
+        let buf = AlignedBuf::new();
+        let start_pos = BUF_SIZE / 2;
+        let mut b = RingBuffer::new(start_pos as u32, start_pos as u32);
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -621,10 +681,11 @@ mod test {
 
     #[test]
     fn stop_before_end() {
-        let mut b = RingBuffer::new(2, 2);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
+        let buf = AlignedBuf::new();
+        let start_pos = BUF_SIZE / 2;
+        let mut b = RingBuffer::new(start_pos as u32, start_pos as u32);
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
         p.write(&[1]);
 
         let r = c.read();
@@ -636,10 +697,11 @@ mod test {
 
     #[test]
     fn zero_release() {
-        let mut b = RingBuffer::new(2, 2);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
+        let buf = AlignedBuf::new();
+        let start_pos = BUF_SIZE / 2;
+        let mut b = RingBuffer::new(start_pos as u32, start_pos as u32);
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
         p.write(&[1, 2]);
 
         let r = c.read();
@@ -651,10 +713,11 @@ mod test {
 
     #[test]
     fn partial_release() {
-        let mut b = RingBuffer::new(2, 2);
-        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
-        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
-        let (mut p, mut c) = unsafe { b.split(buf) };
+        let buf = AlignedBuf::new();
+        let start_pos = BUF_SIZE / 2;
+        let mut b = RingBuffer::new(start_pos as u32, start_pos as u32);
+        // SAFETY: Test buffer is well under i32::MAX / 4. `AlignedBuf` satisfies `ecc-64bit` alignment.
+        let (mut p, mut c) = unsafe { b.split(buf.as_slice()) };
         p.write(&[1, 2]);
 
         let r = c.read();

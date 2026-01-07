@@ -87,6 +87,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-features
 
+  miri:
+    name: Miri (${{ matrix.features || 'no-default-features' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "ecc-64bit"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Miri test
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo +nightly miri test --no-default-features
+          else
+            cargo +nightly miri test --no-default-features --features "${{ matrix.features }}"
+          fi
+
   test:
     name: Test (QEMU, ${{ matrix.profile }})
     runs-on: ubuntu-latest
