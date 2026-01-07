@@ -71,7 +71,6 @@ pub struct Consumer<'a> {
 
 // SAFETY: Consumer can be safely sent to another thread because:
 // - Only one Consumer exists per queue (single-consumer invariant enforced by split())
-// - All methods take &mut self, preventing concurrent access from multiple threads
 // - Atomic operations on header.read/write synchronize with the Producer
 // - The UnsafeCell slice is only accessed through methods that maintain the SPSC invariant
 unsafe impl Send for Consumer<'_> {}
@@ -281,8 +280,8 @@ impl Producer<'_> {
         //   by the producer, because only the consumer gives slices to external code.
         //
         // For `pointer::add`:
-        // - offset in bytes fits in `isize`: `buf.len()` is checked in `split()` to be
-        //   < `i32::MAX / 4`, so all offsets fit.
+        // - offset in bytes fits in `isize`: the only constructor `RingBuffer::split`
+        //   passes this requirement on to its caller.
         // - entire memory range inside the same allocation: we stay within `buf`, which is a
         //   single allocation.
         //
@@ -377,7 +376,7 @@ impl Consumer<'_> {
         //   is updated. The read pointer is only updated in the function
         //   that drops the slice.
         // - Total size in bytes < i32::MAX: we stay inside `buf`
-        //   and the check on `len` before constructing the `Consumer` ensures
+        //   and the only constructor `RingBuffer::split` requires of its caller
         //   that no in-bounds buffer is too big.
         //
         // For `pointer::add`:
