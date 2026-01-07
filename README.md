@@ -54,12 +54,12 @@ let Ok(mut consumer) = defmt_persist::init() else {
 Use the returned `Consumer` to read and transmit buffered logs:
 
 ```rust
-# fn transmit(_: &[u8]) -> usize { 0 }
+# fn transmit(_: (&[u8], &[u8])) -> usize { 0 }
 # fn example(mut consumer: defmt_persist::Consumer<'_>) {
 // Drain any persisted logs from before the reset
 while !consumer.is_empty() {
     let grant = consumer.read();
-    let len = transmit(grant.buf()); // It's OK to not empty the entire grant, data is not lost
+    let len = transmit(grant.bufs()); // It's OK to not empty the entire grant, data is not lost
     grant.release(len);
 }
 # }
