@@ -77,9 +77,10 @@ pub fn init() -> Result<Consumer<'static>, InitError> {
         return Err(InitError::TooLarge);
     }
 
-    // SAFETY: Linker symbols provide the memory region. The atomic swap above
-    // guarantees this code runs exactly once, ensuring exclusive ownership.
-    // Alignment and size are validated above.
+    // SAFETY:
+    // - Linker symbols provide the memory region.
+    // - The atomic swap above guarantees this code runs exactly once, ensuring exclusive ownership.
+    // - Alignment and size are validated above.
     let (p, c) = unsafe { RingBuffer::recover_or_reinitialize(memory) };
 
     // SAFETY: The atomic swap guarantees this is called only once.

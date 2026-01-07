@@ -8,5 +8,5 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 defmt-decoder = { version = "1.0", features = ["unstable"] }
-defmt-persist = { path = "..", default-features = false, features = ["qemu-test", "ecc-64bit"] }
+defmt-persist = { path = "..", default-features = false, features = ["qemu-test", "ecc"] }
 tempfile = "3"

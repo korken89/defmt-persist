@@ -96,7 +96,7 @@ corrupting the persisted logs before the application starts. The bootloader can 
 
 - `rtt`: Also output logs via RTT (default: enabled)
 - `async-await`: Enable async API for waiting on new data (default: enabled)
-- `ecc-64bit`: Add padding for MCUs with 64-bit ECC RAM, e.g. STM32H7/H5 (default: enabled)
+- `ecc`: Add ECC cache flush for MCUs with ECC-protected RAM (32-bit or 64-bit), e.g. STM32H7/H5 (default: enabled)
 
 ## Testing
 
