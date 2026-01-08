@@ -26,7 +26,9 @@ pub fn exit_failure() -> ! {
 pub fn drain_to_uart(consumer: &mut Consumer<'_>) {
     while !consumer.is_empty() {
         let data = consumer.read();
-        uart::write_bytes(data.buf());
+        let (buf1, buf2) = data.bufs();
+        uart::write_bytes(buf1);
+        uart::write_bytes(buf2);
         data.release_all();
     }
 }

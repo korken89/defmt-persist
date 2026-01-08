@@ -359,7 +359,11 @@ impl Consumer<'_> {
         let read = self.header.read.load(Ordering::Relaxed) as usize;
         let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
 
-        let end = if write < read { self.buf.len() } else { write };
+        let (len1, len2) = if write < read {
+            (self.buf.len() - read, write)
+        } else {
+            (write - read, 0)
+        };
 
         // SAFETY:
         // For `slice::from_raw_parts`:
@@ -385,10 +389,36 @@ impl Consumer<'_> {
         //   which holds in the cases we use it.
         // - entire memory range inside the same allocation: read < len, so the
         //   offset remains in the buffer's allocation.
-        let slice = unsafe { slice::from_raw_parts(buf.add(read), end - read) };
+        let slice1 = unsafe { slice::from_raw_parts(buf.add(read), len1) };
+        // SAFETY:
+        // For `slice::from_raw_parts`:
+        // - Non-null, valid, aligned: it is a sub-slice of `buf`,
+        //   relying on the invariants on `read` and `write`.
+        // - Properly initialized values: The memory owned by the consumer
+        //   has been initialized by the producer. When recovering the data
+        //   from a previous run, we instead rely on the ability of u8 to
+        //   accept any (fixed) bit pattern. Since the recovery procedure
+        //   produces the value from memory outside the Rust abstract machine,
+        //   the hazards of uninitialized memory should be mitigated.
+        // - Not mutated for the lifetime: only the producer modifies
+        //   `buf`, but the consumer owns this memory until the read pointer
+        //   is updated. The read pointer is only updated in the function
+        //   that drops the slice.
+        // - Total size in bytes < i32::MAX: we stay inside `buf`
+        //   and the only constructor `RingBuffer::split` requires of its caller
+        //   that no in-bounds buffer is too big.
+        //
+        // For `pointer::add`:
+        // - offset in bytes fits in `isize`: buf.len() fits, which is checked
+        //   before constructing a Consumer. write - read fits if write >= read,
+        //   which holds in the cases we use it.
+        // - entire memory range inside the same allocation: read < len, so the
+        //   offset remains in the buffer's allocation.
+        let slice2 = unsafe { slice::from_raw_parts(buf, len2) };
         GrantR {
             consumer: self,
-            slice,
+            slice1,
+            slice2,
             original_read: read,
         }
     }
@@ -418,7 +448,8 @@ impl Consumer<'_> {
 /// If the grant is dropped without calling `release`, no data is consumed.
 pub struct GrantR<'a, 'c> {
     consumer: &'a Consumer<'c>,
-    slice: &'a [u8],
+    slice1: &'a [u8],
+    slice2: &'a [u8],
     original_read: usize,
 }
 
@@ -437,14 +468,14 @@ impl<'a, 'c> GrantR<'a, 'c> {
     /// This frees up the `used` space for future writes.
     #[inline]
     pub fn release(self, used: usize) {
-        let used = used.min(self.slice.len());
+        let used = used.min(self.slice1.len() + self.slice2.len());
         // Non-atomic read-modify-write is ok here because there can
         // never be more than one active GrantR at a time.
         let read = self.original_read;
         let new_read = if read + used < self.consumer.buf.len() {
             read + used
         } else {
-            0
+            used - self.slice1.len()
         };
         self.consumer
             .header
@@ -462,14 +493,13 @@ impl<'a, 'c> GrantR<'a, 'c> {
     /// This is equivalent to `grant.release(grant.buf().len())`.
     #[inline]
     pub fn release_all(self) {
-        let len = self.slice.len();
-        self.release(len);
+        self.release(usize::MAX);
     }
 
     /// Returns the bytes that this grant is allowed to read.
     #[inline]
-    pub fn buf(&self) -> &[u8] {
-        self.slice
+    pub fn bufs(&self) -> (&[u8], &[u8]) {
+        (self.slice1, self.slice2)
     }
 }
 
@@ -487,10 +517,10 @@ mod test {
         p.write(&[1, 2]);
 
         let r = c.read();
-        assert_eq!(r.buf(), [1, 2]);
+        assert_eq!(r.bufs(), (&[1, 2][..], &[][..]));
         r.release(2);
         let r = c.read();
-        assert_eq!(r.buf(), []);
+        assert_eq!(r.bufs(), (&[][..], &[][..]));
     }
 
     #[test]
@@ -502,10 +532,10 @@ mod test {
         p.write(&[1, 2, 3]);
 
         let r = c.read();
-        assert_eq!(r.buf(), [1, 2, 3]);
+        assert_eq!(r.bufs(), (&[1, 2, 3][..], &[][..]));
         r.release(3);
         let r = c.read();
-        assert_eq!(r.buf(), []);
+        assert_eq!(r.bufs(), (&[][..], &[][..]));
     }
 
     #[test]
@@ -517,13 +547,28 @@ mod test {
         p.write(&[1, 2, 3]);
 
         let r = c.read();
-        assert_eq!(r.buf(), [1, 2]);
+        assert_eq!(r.bufs(), (&[1, 2][..], &[3][..]));
         r.release(2);
         let r = c.read();
-        assert_eq!(r.buf(), [3]);
+        assert_eq!(r.bufs(), (&[3][..], &[][..]));
         r.release(1);
         let r = c.read();
-        assert_eq!(r.buf(), []);
+        assert_eq!(r.bufs(), (&[][..], &[][..]));
+    }
+
+    #[test]
+    fn release_crossing_end() {
+        let mut b = RingBuffer::new(2, 2);
+        let buf = &[const { UnsafeCell::new(MaybeUninit::uninit()) }; 4];
+        // SAFETY: Test buffer is 4 bytes, well under i32::MAX / 4.
+        let (mut p, mut c) = unsafe { b.split(buf) };
+        p.write(&[1, 2, 3]);
+
+        let r = c.read();
+        assert_eq!(r.bufs(), (&[1, 2][..], &[3][..]));
+        r.release(3);
+        let r = c.read();
+        assert_eq!(r.bufs(), (&[][..], &[][..]));
     }
 
     #[test]
@@ -535,13 +580,13 @@ mod test {
         p.write(&[1, 2]);
 
         let r = c.read();
-        assert_eq!(r.buf(), [1]);
+        assert_eq!(r.bufs(), (&[1][..], &[2][..]));
         r.release(1);
         let r = c.read();
-        assert_eq!(r.buf(), [2]);
+        assert_eq!(r.bufs(), (&[2][..], &[][..]));
         r.release(1);
         let r = c.read();
-        assert_eq!(r.buf(), []);
+        assert_eq!(r.bufs(), (&[][..], &[][..]));
     }
 
     #[test]
@@ -553,10 +598,10 @@ mod test {
         p.write(&[1, 2, 3, 4, 5, 6, 7]);
 
         let r = c.read();
-        assert_eq!(r.buf(), [1, 2, 3]);
+        assert_eq!(r.bufs(), (&[1, 2, 3][..], &[][..]));
         r.release(3);
         let r = c.read();
-        assert_eq!(r.buf(), []);
+        assert_eq!(r.bufs(), (&[][..], &[][..]));
     }
 
     #[test]
@@ -568,10 +613,10 @@ mod test {
         p.write(&[1, 2]);
 
         let r = c.read();
-        assert_eq!(r.buf(), [1, 2]);
+        assert_eq!(r.bufs(), (&[1, 2][..], &[][..]));
         r.release(2);
         let r = c.read();
-        assert_eq!(r.buf(), []);
+        assert_eq!(r.bufs(), (&[][..], &[][..]));
     }
 
     #[test]
@@ -583,10 +628,10 @@ mod test {
         p.write(&[1]);
 
         let r = c.read();
-        assert_eq!(r.buf(), [1]);
+        assert_eq!(r.bufs(), (&[1][..], &[][..]));
         r.release(1);
         let r = c.read();
-        assert_eq!(r.buf(), []);
+        assert_eq!(r.bufs(), (&[][..], &[][..]));
     }
 
     #[test]
@@ -598,10 +643,10 @@ mod test {
         p.write(&[1, 2]);
 
         let r = c.read();
-        assert_eq!(r.buf(), [1, 2]);
+        assert_eq!(r.bufs(), (&[1, 2][..], &[][..]));
         r.release(0);
         let r = c.read();
-        assert_eq!(r.buf(), [1, 2]);
+        assert_eq!(r.bufs(), (&[1, 2][..], &[][..]));
     }
 
     #[test]
@@ -613,9 +658,9 @@ mod test {
         p.write(&[1, 2]);
 
         let r = c.read();
-        assert_eq!(r.buf(), [1, 2]);
+        assert_eq!(r.bufs(), (&[1, 2][..], &[][..]));
         r.release(1);
         let r = c.read();
-        assert_eq!(r.buf(), [2]);
+        assert_eq!(r.bufs(), (&[2][..], &[][..]));
     }
 }
