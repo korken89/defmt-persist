@@ -23,6 +23,12 @@ use core::{
 ///
 /// Note: The struct layout changes with this feature, so the MAGIC value differs to
 /// force reinitialization when switching between configurations.
+///
+/// # CPU Data Cache
+///
+/// On Cortex-M7 and other cores with a data cache, ensure the persist memory region is
+/// configured as non-cacheable via the MPU. Otherwise, data may be lost in the CPU cache
+/// on reset, even with ECC flushing enabled. Cortex-M0/M0+/M3/M4 do not have a data cache.
 #[repr(C)]
 pub struct RingBuffer {
     /// If the value is [`MAGIC`], the struct is initialized.
