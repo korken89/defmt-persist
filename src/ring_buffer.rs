@@ -5,27 +5,30 @@ use core::{
     mem::MaybeUninit,
     ops::Range,
     ptr, slice,
-    sync::atomic::{AtomicU32, Ordering, fence},
+    sync::atomic::{AtomicU32, Ordering, compiler_fence, fence},
 };
 
 /// A single-producer, single-consumer (SPSC) lock-free queue storing up to `len-1` bytes.
 /// `len` is defined by the leftover size of the region after the [`RingBuffer`] has taken its
 /// size.
 ///
-/// # ECC Padding
+/// # ECC Flush
 ///
-/// On MCUs with 64-bit ECC-protected RAM, each write only commits to memory when the
-/// full 64-bit ECC word is written. If `read` and `write` share an ECC word, a reset
-/// mid-write could corrupt both fields. Enable the `ecc-64bit` feature to add padding
-/// that ensures each field occupies its own ECC word.
+/// On MCUs with 32-bit or 64-bit ECC-protected RAM (e.g., STM32H7/H5), writes are cached
+/// until a full ECC word is written. A reset before the cache is flushed can lose data.
+///
+/// Enable the `ecc` feature to add an `_ecc_flush` field. After each write operation,
+/// a single byte is written to this field, which flushes the ECC write cache by performing
+/// an unaligned access to a different SRAM word.
 ///
 /// Note: The struct layout changes with this feature, so the MAGIC value differs to
 /// force reinitialization when switching between configurations.
 ///
-/// Note: Data writes don't need explicit ECC flushes. STM32H7/H5 MCUs use a single-word
-/// ECC write cache - when we subsequently update the index (a different 64-bit word),
-/// the cached data write is automatically flushed. The index itself needs the padding
-/// write to flush its own 64-bit word before a potential reset.
+/// # CPU Data Cache
+///
+/// On Cortex-M7 and other cores with a data cache, ensure the persist memory region is
+/// configured as non-cacheable via the MPU. Otherwise, data may be lost in the CPU cache
+/// on reset, even with ECC flushing enabled. Cortex-M0/M0+/M3/M4 do not have a data cache.
 #[repr(C)]
 pub struct RingBuffer {
     /// If the value is [`MAGIC`], the struct is initialized.
@@ -37,18 +40,14 @@ pub struct RingBuffer {
     ///
     /// The RingBuffer always guarantees `read < len`.
     read: AtomicU32,
-    /// Padding to ensure `read` occupies its own 64-bit ECC word.
-    /// Written after `read` to flush the ECC write buffer.
-    #[cfg(feature = "ecc-64bit")]
-    _pad_read: AtomicU32,
     /// Where the next write starts.
     ///
     /// The RingBuffer always guarantees `write < len`.
     write: AtomicU32,
-    /// Padding to ensure `write` occupies its own 64-bit ECC word.
-    /// Written after `write` to flush the ECC write buffer.
-    #[cfg(feature = "ecc-64bit")]
-    _pad_write: AtomicU32,
+    /// Writing a single byte to this field flushes the ECC write cache.
+    /// An unaligned write to a different SRAM word forces the cache to commit.
+    #[cfg(feature = "ecc")]
+    _ecc_flush: UnsafeCell<u64>,
 }
 
 /// Writes data into the buffer.
@@ -78,10 +77,10 @@ unsafe impl Send for Consumer<'_> {}
 /// Value used to indicate that the queue is initialized.
 ///
 /// Replace this if the layout or field semantics change in a backwards-incompatible way.
-/// The ECC-padded layout uses a different magic to force reinitialization when switching.
-#[cfg(not(feature = "ecc-64bit"))]
+/// The `ecc` layout uses a different magic to force reinitialization when switching.
+#[cfg(not(feature = "ecc"))]
 const MAGIC: u128 = 0xb528_c25f_90c6_16af_cbc1_502c_09c1_fd6e;
-#[cfg(feature = "ecc-64bit")]
+#[cfg(feature = "ecc")]
 const MAGIC: u128 = 0x1dff_2060_27b9_f2b4_a194_1013_69cd_3c6c;
 
 /// Field offsets for corruption testing.
@@ -108,10 +107,29 @@ impl RingBuffer {
             header: MAGIC,
             read: AtomicU32::new(read),
             write: AtomicU32::new(write),
-            #[cfg(feature = "ecc-64bit")]
-            _pad_read: AtomicU32::new(0),
-            #[cfg(feature = "ecc-64bit")]
-            _pad_write: AtomicU32::new(0),
+            #[cfg(feature = "ecc")]
+            _ecc_flush: UnsafeCell::new(0),
+        }
+    }
+
+    /// Flush the ECC write cache by writing a single byte to the flush field.
+    ///
+    /// No-op when `ecc` feature is disabled.
+    #[inline]
+    fn flush_ecc(&self) {
+        #[cfg(feature = "ecc")]
+        {
+            // Ensure previous writes are emitted before the volatile write.
+            compiler_fence(Ordering::SeqCst);
+            // SAFETY: Writing a single byte to our own `UnsafeCell` field is safe.
+            // This unaligned access to a different SRAM word flushes the ECC cache.
+            // Concurrent writes from Producer and Consumer are safe because:
+            // - Single-byte writes are atomic on all supported platforms.
+            // - The value written is always 0; we don't care about the result.
+            unsafe {
+                let ptr: *mut u8 = self._ecc_flush.get().cast();
+                ptr.write_volatile(0);
+            }
         }
     }
     /// Creates a `RingBuffer` or recovers previous state if available.
@@ -145,7 +163,7 @@ impl RingBuffer {
         // SAFETY:
         // - Alignment is guaranteed by the caller.
         // - Size is guaranteed by the caller.
-        // - All fields (`u128`, `AtomicU32`, `[UnsafeCell<MaybeUninit<u8>>, X]`)
+        // - All fields (`u128`, `AtomicU32`, `UnsafeCell<u64>`, `[UnsafeCell<MaybeUninit<u8>>, X]`)
         //   are valid for any bit pattern, so interpreting the raw memory as this
         //   type and buffer is sound. As the memory is initialized outside the Rust abstract
         //   machine (of the running program), we consider the caveats of non-fixed
@@ -159,18 +177,9 @@ impl RingBuffer {
         // optimizsed away.
         if unsafe { header.read_volatile() } != MAGIC {
             v.read.store(0, Ordering::Relaxed);
-            #[cfg(feature = "ecc-64bit")]
-            // SAFETY: Pointer is valid and aligned, from our own field.
-            unsafe {
-                v._pad_read.as_ptr().write_volatile(0)
-            };
             // The intermediate state doesn't matter until header == MAGIC
             v.write.store(0, Ordering::Relaxed);
-            #[cfg(feature = "ecc-64bit")]
-            // SAFETY: Pointer is valid and aligned, from our own field.
-            unsafe {
-                v._pad_write.as_ptr().write_volatile(0)
-            };
+            v.flush_ecc();
 
             fence(Ordering::SeqCst);
             // SAFETY: A regular assignment to v.header would be safe
@@ -200,16 +209,7 @@ impl RingBuffer {
                     v.write.store(0, Ordering::Relaxed);
                 }
             };
-            #[cfg(feature = "ecc-64bit")]
-            // SAFETY: Pointer is valid and aligned, from our own field.
-            unsafe {
-                v._pad_read.as_ptr().write_volatile(0)
-            };
-            #[cfg(feature = "ecc-64bit")]
-            // SAFETY: Pointer is valid and aligned, from our own field.
-            unsafe {
-                v._pad_write.as_ptr().write_volatile(0)
-            };
+            v.flush_ecc();
         }
         fence(Ordering::SeqCst);
 
@@ -268,6 +268,9 @@ impl Producer<'_> {
         let write = self.header.write.load(Ordering::Relaxed) as usize;
         let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
         let len = data.len().min(self.available(read, write));
+        if len == 0 {
+            return;
+        }
 
         // There are `ptr::copy_nonoverlapping` and `pointer::add` calls below.
         // The common safety arguments are:
@@ -321,15 +324,16 @@ impl Producer<'_> {
             unsafe { ptr::copy_nonoverlapping(data.as_ptr(), buf.add(write), len) };
         }
 
+        // Flush data before updating index. With 32-bit ECC, the index store may flush
+        // immediately while data is still cached. This ensures the index never points
+        // to uncommitted data.
+        self.header.flush_ecc();
+
         self.header.write.store(
             (write.wrapping_add(len) % self.buf.len()) as u32,
             Ordering::Release,
         );
-        #[cfg(feature = "ecc-64bit")]
-        // SAFETY: Pointer is valid and aligned, from our own field.
-        unsafe {
-            self.header._pad_write.as_ptr().write_volatile(0)
-        };
+        self.header.flush_ecc();
     }
 }
 
@@ -457,7 +461,7 @@ pub struct GrantR<'a, 'c> {
 // - Only one GrantR can exist at a time (Consumer::read takes &mut self)
 // - The slice is a regular &[u8] pointing to consumer-owned memory that the producer
 //   won't modify until release() updates the read pointer
-// - release() only performs atomic stores to header.read (and _pad_read for ECC)
+// - release() only performs atomic stores to header.read (and `_ecc_flush` for ECC)
 // - The underlying UnsafeCell in Consumer::buf is not directly accessed through GrantR;
 //   the slice was materialized in Consumer::read before GrantR was created
 unsafe impl Send for GrantR<'_, '_> {}
@@ -481,11 +485,7 @@ impl<'a, 'c> GrantR<'a, 'c> {
             .header
             .read
             .store(new_read as u32, Ordering::Release);
-        #[cfg(feature = "ecc-64bit")]
-        // SAFETY: Pointer is valid and aligned, from our own field.
-        unsafe {
-            self.consumer.header._pad_read.as_ptr().write_volatile(0)
-        };
+        self.consumer.header.flush_ecc();
     }
 
     /// Finish the read, marking all bytes as used.

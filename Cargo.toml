@@ -20,7 +20,7 @@ cortex-m-semihosting = { version = "0.5", optional = true }
 default = [
     "rtt",
     "async-await",
-    "ecc-64bit",
+    "ecc",
     # NOTE(defmt-persist): It is *strongly* recommended to use the rzcobs encoding when
     # using this crate. If the buffer is ever filled, then the remaining
     # bytes will be discarded, which will corrupt the message stream.
@@ -34,17 +34,19 @@ default = [
 ]
 async-await = [ ]
 rtt = [ ]
-# Adds padding to ensure each atomic field occupies its own 64-bit ECC word.
-# Required for reset-safe persistence on MCUs with 64-bit ECC-protected RAM,
+# Adds ECC cache flush for MCUs with ECC-protected RAM (32-bit or 64-bit),
 # such as some STM32 series (e.g., STM32H7, STM32H5).
 #
-# These MCUs use a single-word ECC write cache. Unaligned writes stay in cache
-# until a write to a different word flushes them. Without padding, a reset
-# mid-write could corrupt both read and write indices if they share an ECC word.
-# With padding, each index occupies its own 64-bit word and is explicitly flushed.
+# These MCUs use a single-word ECC write cache. Writes stay in cache until
+# a write to a different word flushes them. Without flushing, a reset could
+# lose data that was written but still sitting in the cache.
+#
+# With this feature, after each write to the ring buffer (indexes and/or data),
+# a single byte is written to a dedicated flush field, forcing the ECC cache
+# to commit.
 #
 # See: https://community.st.com/t5/stm32-mcus/faq-stm32-sram-backup-sram-content-is-not-preserved-after-reset/ta-p/861433
-ecc-64bit = [ ]
+ecc = [ ]
 # Enable semihosting output for QEMU testing. When enabled, defmt frames are
 # written to semihosting stdout in addition to RTT and the ring buffer.
 qemu-test = ["dep:cortex-m-semihosting"]
