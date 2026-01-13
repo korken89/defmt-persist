@@ -13,7 +13,7 @@ use testsuite::{drain_to_uart, dump_persist_region, entry, exit_failure, exit_su
 
 #[entry]
 fn main() -> ! {
-    let metadata = defmt_persist::init().unwrap();
+    let metadata = defmt_persist::init(|old| old.clone()).unwrap();
     let mut consumer = metadata.consumer;
 
     if !consumer.is_empty() {
