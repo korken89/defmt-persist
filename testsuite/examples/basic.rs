@@ -8,7 +8,7 @@ use testsuite::{drain_to_uart, entry, exit_failure, exit_success};
 
 #[entry]
 fn main() -> ! {
-    let metadata = defmt_persist::init().unwrap();
+    let metadata = defmt_persist::init(|old| old.clone()).unwrap();
     let mut consumer = metadata.consumer;
 
     // Test all log levels.

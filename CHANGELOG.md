@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ### Added
 
+- Added support for a persistent firmware identifier to help hosts identify the running binary and select the correct ELF for decoding.
+
 ### Fixed
 
 ### Changed

@@ -1,0 +1,12 @@
+=== Run 1 ===
+[INFO ] recovered_identifier: Identifier([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+[INFO ] current_identifier: Identifier([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+[INFO ] phase 1: fresh start
+
+=== Run 2 ===
+[INFO ] recovered_identifier: Identifier([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+[INFO ] current_identifier: Identifier([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+[INFO ] phase 1: fresh start
+[INFO ] recovered_identifier: Identifier([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+[INFO ] current_identifier: Identifier([17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 26, 27, 28, 29, 30, 31])
+[INFO ] phase 2: identifier correctly persisted!

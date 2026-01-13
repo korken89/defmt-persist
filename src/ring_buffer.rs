@@ -36,6 +36,8 @@ pub struct RingBuffer {
     /// In particular, this means that the reader-owned part of the buffer
     /// contains real data.
     header: u128,
+    /// This contains the marker which identifies the buffer contents.
+    identifier: Identifier,
     /// Where the next read starts.
     ///
     /// The RingBuffer always guarantees `read < len`.
@@ -49,6 +51,12 @@ pub struct RingBuffer {
     #[cfg(feature = "ecc")]
     _ecc_flush: UnsafeCell<u64>,
 }
+
+/// Identifier for the firmware that generated a log. It's up
+/// to the implementer to use as many bytes as they deem necessary.
+#[repr(transparent)]
+#[derive(Clone, defmt::Format, Debug, PartialEq, Eq)]
+pub struct Identifier(pub [u8; 16]);
 
 /// Writes data into the buffer.
 pub struct Producer<'a> {
@@ -64,7 +72,7 @@ pub struct Producer<'a> {
 /// With the `async-await` feature, use [`Consumer::wait_for_data`] to asynchronously
 /// wait for new data to be available.
 pub struct Consumer<'a> {
-    header: &'a RingBuffer,
+    pub(crate) header: &'a RingBuffer,
     buf: &'a [UnsafeCell<MaybeUninit<u8>>],
 }
 
@@ -79,9 +87,9 @@ unsafe impl Send for Consumer<'_> {}
 /// Replace this if the layout or field semantics change in a backwards-incompatible way.
 /// The `ecc` layout uses a different magic to force reinitialization when switching.
 #[cfg(not(feature = "ecc"))]
-const MAGIC: u128 = 0xb528_c25f_90c6_16af_cbc1_502c_09c1_fd6e;
+const MAGIC: u128 = 0xcd6f_a223_a2d9_29e5_2329_b0b4_5235_fb83;
 #[cfg(feature = "ecc")]
-const MAGIC: u128 = 0x1dff_2060_27b9_f2b4_a194_1013_69cd_3c6c;
+const MAGIC: u128 = 0x3b50_0bf7_63b0_a8eb_d3f8_de4c_ab9e_9655;
 
 /// Field offsets for corruption testing.
 #[cfg(feature = "qemu-test")]
@@ -105,6 +113,7 @@ impl RingBuffer {
     pub(crate) fn new(read: u32, write: u32) -> Self {
         RingBuffer {
             header: MAGIC,
+            identifier: Identifier([0; 16]),
             read: AtomicU32::new(read),
             write: AtomicU32::new(write),
             #[cfg(feature = "ecc")]
@@ -116,7 +125,7 @@ impl RingBuffer {
     ///
     /// No-op when `ecc` feature is disabled.
     #[inline]
-    fn flush_ecc(&self) {
+    pub(crate) fn flush_ecc(&self) {
         #[cfg(feature = "ecc")]
         {
             // Ensure previous writes are emitted before the volatile write.
@@ -156,7 +165,7 @@ impl RingBuffer {
     /// input and do not rely on its value for memory safety.
     pub(crate) unsafe fn recover_or_reinitialize(
         memory: Range<usize>,
-    ) -> (Producer<'static>, Consumer<'static>) {
+    ) -> (Producer<'static>, Consumer<'static>, *mut Identifier) {
         let v: *mut Self = ptr::with_exposed_provenance_mut(memory.start);
         let buf_len = memory.len() - size_of::<RingBuffer>();
 
@@ -225,8 +234,12 @@ impl RingBuffer {
             )
         };
 
+        let identifier = ptr::from_mut(&mut v.identifier);
+
         // SAFETY: The caller guarantees buf.len() < i32::MAX / 4.
-        unsafe { v.split(buf) }
+        let (p, c) = unsafe { v.split(buf) };
+
+        (p, c, identifier)
     }
 
     /// Splits the queue into producer and consumer given a memory area.
@@ -338,6 +351,15 @@ impl Producer<'_> {
 }
 
 impl Consumer<'_> {
+    /// Access the current identifier (as set by [`init`](crate::init)).
+    ///
+    /// This returns the identifier returned by the closure passed to `init()`,
+    /// not the identifier of the firmware that produced the recovered logs.
+    /// For that, use [`ConsumerAndMetadata::recovered_identifier`](crate::ConsumerAndMetadata::recovered_identifier).
+    pub fn identifier(&self) -> &Identifier {
+        &self.header.identifier
+    }
+
     /// Returns `true` if there is no data available to read.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -445,8 +467,8 @@ impl Consumer<'_> {
 
 /// A read grant providing access to buffered data.
 ///
-/// Obtained from [`Consumer::read`]. The grant provides a slice of available data
-/// via [`GrantR::buf`]. When done reading, call [`GrantR::release`] to mark bytes
+/// Obtained from [`Consumer::read`]. The grant provides slices of available data
+/// via [`GrantR::bufs`]. When done reading, call [`GrantR::release`] to mark bytes
 /// as consumed and free space for new writes.
 ///
 /// If the grant is dropped without calling `release`, no data is consumed.
