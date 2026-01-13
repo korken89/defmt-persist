@@ -14,7 +14,8 @@ use testsuite::{drain_to_uart, entry, exit_failure, exit_success};
 
 #[entry]
 fn main() -> ! {
-    let mut consumer = defmt_persist::init().unwrap();
+    let metadata = defmt_persist::init().unwrap();
+    let mut consumer = metadata.consumer;
 
     // Log 1000 messages - this will wrap around the buffer many times.
     for i in 0..1000u32 {

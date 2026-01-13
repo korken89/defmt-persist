@@ -27,6 +27,18 @@ pub enum InitError {
     TooLarge,
 }
 
+/// Holds the log reader and some additional information from initialization.
+pub struct ConsumerAndMetadata<'a> {
+    /// Reads logs from the buffer.
+    pub consumer: Consumer<'a>,
+    /// Number of bytes that were not from the current run.
+    ///
+    /// If the recovered logs were produced by a different firmware,
+    /// different decoders need to be used. This field helps identify the
+    /// data that was definitely produced by the current firmware.
+    pub recovered_logs_len: usize,
+}
+
 /// Initialize the logger.
 ///
 /// This reads the buffer region from the linker symbols `__defmt_persist_start` and
@@ -49,7 +61,7 @@ pub enum InitError {
 ///
 /// Corrupt memory may be accepted as valid. While index bounds are validated,
 /// the data content is not. Treat recovered logs as untrusted external input.
-pub fn init() -> Result<Consumer<'static>, InitError> {
+pub fn init() -> Result<ConsumerAndMetadata<'static>, InitError> {
     // SAFETY: These symbols are provided by the linker script and point to a reserved memory region.
     unsafe extern "C" {
         static __defmt_persist_start: u8;
@@ -81,10 +93,19 @@ pub fn init() -> Result<Consumer<'static>, InitError> {
     // - Linker symbols provide the memory region.
     // - The atomic swap above guarantees this code runs exactly once, ensuring exclusive ownership.
     // - Alignment and size are validated above.
-    let (p, c) = unsafe { RingBuffer::recover_or_reinitialize(memory) };
+    let (p, mut c) = unsafe { RingBuffer::recover_or_reinitialize(memory) };
 
     // SAFETY: The atomic swap guarantees this is called only once.
     unsafe { logger::LOGGER_STATE.initialize(p) };
 
-    Ok(c)
+    let recovered_logs_len = {
+        let grant = c.read();
+        let (buf1, buf2) = grant.bufs();
+        buf1.len() + buf2.len()
+    };
+
+    Ok(ConsumerAndMetadata {
+        consumer: c,
+        recovered_logs_len,
+    })
 }
