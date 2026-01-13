@@ -3,6 +3,6 @@
 
 === Run 2 ===
 [INFO ] Some text before a panic, that did NOT have time to drain before panic.
-[ERROR] panicked at testsuite/examples/panic_test.rs:33:9:
+[ERROR] panicked at testsuite/examples/panic_test.rs:34:9:
 Hello from panic message!
 [INFO ] Some text during second run after a panic.

@@ -8,7 +8,8 @@ use testsuite::{drain_to_uart, entry, exit_failure, exit_success};
 
 #[entry]
 fn main() -> ! {
-    let mut consumer = defmt_persist::init().unwrap();
+    let metadata = defmt_persist::init().unwrap();
+    let mut consumer = metadata.consumer;
 
     // Test all log levels.
     defmt::println!("println: Hello from defmt-persist!");
