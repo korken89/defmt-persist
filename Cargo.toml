@@ -10,6 +10,7 @@ authors = ["Emil Fresk <emil.fresk@gmail.com>", "Nils Fitinghoff"]
 description = "Persistent defmt logger that survives resets"
 keywords = ["defmt", "logging", "embedded", "no_std"]
 categories = ["embedded", "no-std"]
+repository = "https://github.com/korken89/defmt-persist"
 
 [dependencies]
 defmt = "1.0.1"
