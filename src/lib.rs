@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use ring_buffer::RingBuffer;
 #[cfg(feature = "qemu-test")]
 pub use ring_buffer::offsets;
-pub use ring_buffer::{Consumer, GrantR};
+pub use ring_buffer::{Consumer, GrantR, Identifier};
 
 #[cfg(feature = "async-await")]
 pub(crate) mod atomic_waker;
@@ -37,6 +37,8 @@ pub struct ConsumerAndMetadata<'a> {
     /// different decoders need to be used. This field helps identify the
     /// data that was definitely produced by the current firmware.
     pub recovered_logs_len: usize,
+    /// The identifier for the firmware that generated the recovered logs.
+    pub recovered_identifier: Identifier,
 }
 
 /// Initialize the logger.
@@ -44,6 +46,18 @@ pub struct ConsumerAndMetadata<'a> {
 /// This reads the buffer region from the linker symbols `__defmt_persist_start` and
 /// `__defmt_persist_end`. Define these in your linker script to reserve memory for
 /// the persist buffer.
+///
+/// # Identifier
+///
+/// The closure `f` receives the previous [`Identifier`] and returns a new one to store.
+/// Use the identifier to detect if recovered logs were produced by a different firmware
+/// version. The returned [`ConsumerAndMetadata`] contains both:
+/// - `recovered_identifier`: The identifier from before this call (previous firmware)
+/// - `consumer.identifier()`: The new identifier set by the closure (current firmware)
+///
+/// A common approach is to hash the firmware flash content using a simple hash function
+/// like FNV-1a. Use a hash with enough output bits to avoid collisions between firmware
+/// versions.
 ///
 /// # Errors
 ///
@@ -61,7 +75,9 @@ pub struct ConsumerAndMetadata<'a> {
 ///
 /// Corrupt memory may be accepted as valid. While index bounds are validated,
 /// the data content is not. Treat recovered logs as untrusted external input.
-pub fn init() -> Result<ConsumerAndMetadata<'static>, InitError> {
+pub fn init(
+    f: impl FnOnce(&Identifier) -> Identifier,
+) -> Result<ConsumerAndMetadata<'static>, InitError> {
     // SAFETY: These symbols are provided by the linker script and point to a reserved memory region.
     unsafe extern "C" {
         static __defmt_persist_start: u8;
@@ -93,7 +109,7 @@ pub fn init() -> Result<ConsumerAndMetadata<'static>, InitError> {
     // - Linker symbols provide the memory region.
     // - The atomic swap above guarantees this code runs exactly once, ensuring exclusive ownership.
     // - Alignment and size are validated above.
-    let (p, mut c) = unsafe { RingBuffer::recover_or_reinitialize(memory) };
+    let (p, mut c, identifier) = unsafe { RingBuffer::recover_or_reinitialize(memory) };
 
     // SAFETY: The atomic swap guarantees this is called only once.
     unsafe { logger::LOGGER_STATE.initialize(p) };
@@ -104,8 +120,16 @@ pub fn init() -> Result<ConsumerAndMetadata<'static>, InitError> {
         buf1.len() + buf2.len()
     };
 
+    // SAFETY: `identifier` points to a valid, aligned field within the RingBuffer.
+    let old_identifier = unsafe { identifier.read_volatile() };
+    let new_identifier = f(&old_identifier);
+    // SAFETY: `identifier` points to a valid, aligned field within the RingBuffer.
+    unsafe { identifier.write_volatile(new_identifier) };
+    c.header.flush_ecc();
+
     Ok(ConsumerAndMetadata {
         consumer: c,
         recovered_logs_len,
+        recovered_identifier: old_identifier,
     })
 }
