@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 use core::mem::{align_of, size_of};
+use core::ops::Range;
 use core::sync::atomic::{AtomicBool, Ordering};
 use ring_buffer::RingBuffer;
 #[cfg(feature = "qemu-test")]
@@ -39,6 +40,18 @@ pub struct ConsumerAndMetadata<'a> {
     pub recovered_logs_len: usize,
 }
 
+fn get_persist_memory() -> Range<usize> {
+    // SAFETY: These symbols are provided by the linker script and point to a reserved memory region.
+    unsafe extern "C" {
+        static __defmt_persist_start: u8;
+        static __defmt_persist_end: u8;
+    }
+
+    let start = (&raw const __defmt_persist_start).expose_provenance();
+    let end = (&raw const __defmt_persist_end).expose_provenance();
+    start..end
+}
+
 /// Initialize the logger.
 ///
 /// This reads the buffer region from the linker symbols `__defmt_persist_start` and
@@ -62,21 +75,13 @@ pub struct ConsumerAndMetadata<'a> {
 /// Corrupt memory may be accepted as valid. While index bounds are validated,
 /// the data content is not. Treat recovered logs as untrusted external input.
 pub fn init() -> Result<ConsumerAndMetadata<'static>, InitError> {
-    // SAFETY: These symbols are provided by the linker script and point to a reserved memory region.
-    unsafe extern "C" {
-        static __defmt_persist_start: u8;
-        static __defmt_persist_end: u8;
-    }
-
     static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         return Err(InitError::AlreadyInitialized);
     }
 
-    let start = (&raw const __defmt_persist_start).expose_provenance();
-    let end = (&raw const __defmt_persist_end).expose_provenance();
-    let memory = start..end;
+    let memory = get_persist_memory();
 
     if !memory.start.is_multiple_of(align_of::<RingBuffer>()) {
         return Err(InitError::BadAlignment);
@@ -108,4 +113,34 @@ pub fn init() -> Result<ConsumerAndMetadata<'static>, InitError> {
         consumer: c,
         recovered_logs_len,
     })
+}
+
+/// Logger memory that may need special treatment.
+pub struct Memory {
+    /// User-configured persist memory.
+    pub persist: Range<usize>,
+    /// The place where RTT clients discover available channels and
+    /// where the ring buffer bookkeeping is done.
+    #[cfg(feature = "rtt")]
+    pub rtt_header: Range<usize>,
+    /// RTT log data resides here.
+    #[cfg(feature = "rtt")]
+    pub rtt_buffer: Range<usize>,
+}
+
+/// Memory allocations associated with the logger that may need special treatment.
+///
+/// Any of these that are placed in memory with caching support should
+/// be configured as non-cacheable for the logger to work properly.
+///
+/// The configuration of this is chip-dependent, but will typically
+/// involve configuring an MPU.
+pub fn memory() -> Memory {
+    Memory {
+        persist: get_persist_memory(),
+        #[cfg(feature = "rtt")]
+        rtt_header: logger::rtt::rtt_header_memory(),
+        #[cfg(feature = "rtt")]
+        rtt_buffer: logger::rtt::rtt_buffer_memory(),
+    }
 }
