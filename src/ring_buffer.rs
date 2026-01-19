@@ -352,8 +352,7 @@ impl Consumer<'_> {
     /// Read data from the buffer.
     ///
     /// If the data available to read crosses the end of the ring, this
-    /// function may provide a smaller slice. Only after releasing the data
-    /// up to the end of the ring will the next call provide more data.
+    /// function will provide two slices.
     #[inline]
     #[must_use]
     pub fn read(&mut self) -> GrantR<'_, '_> {
