@@ -8,7 +8,7 @@ use critical_section::RestoreState;
 use defmt::Encoder;
 
 #[cfg(feature = "rtt")]
-mod rtt;
+pub(crate) mod rtt;
 
 #[cfg(feature = "qemu-test")]
 mod semihosting;

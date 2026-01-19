@@ -82,12 +82,12 @@ pub fn init(new_identifier: Identifier) -> Result<ConsumerAndMetadata<'static>, 
         return Err(InitError::AlreadyInitialized);
     }
 
-    let memory = memory_from_symbols()?;
+    let memory = get_persist_memory_from_symbols()?;
 
     // SAFETY:
     // - Linker symbols provide the memory region.
     // - The atomic swap above guarantees this code runs exactly once, ensuring exclusive ownership.
-    // - Alignment and size are validated by memory_from_symbols.
+    // - Alignment and size are validated by get_persist_memory_from_symbols.
     let (p, mut c, old_identifier) =
         unsafe { RingBuffer::recover_or_reinitialize(memory, new_identifier) };
 
@@ -120,7 +120,7 @@ pub fn init(new_identifier: Identifier) -> Result<ConsumerAndMetadata<'static>, 
 /// - [`InitError::TooSmall`]: Memory region is too small for the header plus data
 /// - [`InitError::TooLarge`]: Buffer size would overflow pointer arithmetic
 pub fn peek_identifier() -> Result<Option<Identifier>, InitError> {
-    let memory = memory_from_symbols()?;
+    let memory = get_persist_memory_from_symbols()?;
 
     // Block `init` from taking the memory for the duration of this
     // function. The mechanism is a bit clunky, but if someone managed
@@ -133,7 +133,7 @@ pub fn peek_identifier() -> Result<Option<Identifier>, InitError> {
     // SAFETY:
     // - Linker symbols provide the memory region.
     // - The atomic swap above guarantees this code has exclusive ownership.
-    // - Alignment and size are validated by memory_from_symbols.
+    // - Alignment and size are validated by get_persist_memory_from_symbols.
     let v = unsafe { RingBuffer::peek_identifier(memory) };
 
     INITIALIZED.store(false, Ordering::SeqCst);
@@ -141,7 +141,7 @@ pub fn peek_identifier() -> Result<Option<Identifier>, InitError> {
     Ok(v)
 }
 
-fn memory_from_symbols() -> Result<Range<usize>, InitError> {
+fn get_persist_memory_from_symbols() -> Result<Range<usize>, InitError> {
     // SAFETY: These symbols are provided by the linker script and point to a reserved memory region.
     unsafe extern "C" {
         static __defmt_persist_start: u8;
@@ -164,4 +164,34 @@ fn memory_from_symbols() -> Result<Range<usize>, InitError> {
     }
 
     Ok(memory)
+}
+
+/// Logger memory that may need special treatment.
+pub struct Memory {
+    /// User-configured persist memory.
+    pub persist: Range<usize>,
+    /// The place where RTT clients discover available channels and
+    /// where the ring buffer bookkeeping is done.
+    #[cfg(feature = "rtt")]
+    pub rtt_header: Range<usize>,
+    /// RTT log data resides here.
+    #[cfg(feature = "rtt")]
+    pub rtt_buffer: Range<usize>,
+}
+
+/// Memory allocations associated with the logger that may need special treatment.
+///
+/// Any of these that are placed in memory with caching support should
+/// be configured as non-cacheable for the logger to work properly.
+///
+/// The configuration of this is chip-dependent, but will typically
+/// involve configuring an MPU.
+pub fn memory() -> Result<Memory, InitError> {
+    Ok(Memory {
+        persist: get_persist_memory_from_symbols()?,
+        #[cfg(feature = "rtt")]
+        rtt_header: logger::rtt::rtt_header_memory(),
+        #[cfg(feature = "rtt")]
+        rtt_buffer: logger::rtt::rtt_buffer_memory(),
+    })
 }
