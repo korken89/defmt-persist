@@ -6,6 +6,7 @@
 use core::{
     cell::UnsafeCell,
     mem::MaybeUninit,
+    ops::Range,
     ptr,
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -59,6 +60,18 @@ static _SEGGER_RTT: RttHeader = RttHeader::new(NAME.as_ptr(), BUFFER.0.get().cas
     unsafe(link_section = ".uninit.defmt-rtt.BUFFER")
 )]
 static BUFFER: UnsafeBuffer = UnsafeBuffer(UnsafeCell::new([MaybeUninit::uninit(); BUF_SIZE]));
+
+pub(crate) fn rtt_header_memory() -> Range<usize> {
+    let start = &raw const _SEGGER_RTT as usize;
+    let end = start + size_of::<RttHeader>();
+    start..end
+}
+
+pub(crate) fn rtt_buffer_memory() -> Range<usize> {
+    let start = &raw const BUFFER as usize;
+    let end = start + size_of::<UnsafeBuffer>();
+    start..end
+}
 
 // Place NAME in data section, so the whole RTT header can be read from RAM.
 // This is useful if flash access gets disabled by the firmware at runtime.

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ### Added
 
+- Provide list of caching-sensitive memory
+
 ### Fixed
 
 - doc comment for `Consumer::read`
