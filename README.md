@@ -46,14 +46,14 @@ __defmt_persist_end   = ORIGIN(DEFMT_PERSIST) + LENGTH(DEFMT_PERSIST);
 Then call `init` early in your program:
 
 ```rust,ignore
-let Ok(metadata) = defmt_persist::init(|old| old.clone()) else {
+let Ok(metadata) = defmt_persist::init(Default::default()) else {
     panic!("init failed");
 };
 let mut consumer = metadata.consumer;
 ```
 
-The closure receives the previous identifier and returns the new one to store. Use
-`metadata.recovered_identifier` to check if logs were produced by a different firmware version.
+The argument to `init` is an identifier to store. Use `metadata.recovered_identifier` to check
+if logs were produced by a different firmware version.
 
 Use the returned `Consumer` to read and transmit buffered logs:
 
