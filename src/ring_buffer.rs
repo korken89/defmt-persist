@@ -176,8 +176,13 @@ impl RingBuffer {
                 v.read.store(0, Ordering::Relaxed);
                 // The intermediate state doesn't matter until header == MAGIC
                 v.write.store(0, Ordering::Relaxed);
+                let identifier = ptr::from_mut(&mut v.identifier);
+                // SAFETY: `identifier` points to a valid, aligned field.
+                unsafe { identifier.write_volatile(new_identifier) };
                 v.flush_ecc();
 
+                // The identifier must be in memory before the header claims it
+                // is valid, otherwise a reset in between recovers garbage.
                 fence(Ordering::SeqCst);
                 let header = ptr::from_mut(&mut v.header);
                 // SAFETY: A regular assignment to v.header would be safe
@@ -214,13 +219,12 @@ impl RingBuffer {
                 let identifier = ptr::from_mut(&mut v.identifier);
                 // SAFETY: `identifier` points to a valid, aligned field.
                 old_identifier = Some(unsafe { identifier.read_volatile() });
+                // SAFETY: `identifier` points to a valid, aligned field.
+                unsafe { identifier.write_volatile(new_identifier) };
 
                 v
             }
         };
-        let identifier = ptr::from_mut(&mut v.identifier);
-        // SAFETY: `identifier` points to a valid, aligned field.
-        unsafe { identifier.write_volatile(new_identifier) };
         v.flush_ecc();
         fence(Ordering::SeqCst);
 
