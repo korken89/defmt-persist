@@ -174,6 +174,9 @@ pub struct Memory {
     /// where the ring buffer bookkeeping is done.
     #[cfg(feature = "rtt")]
     pub rtt_header: Range<usize>,
+    /// The channel name for the single RTT channel, pointed to by the header.
+    #[cfg(feature = "rtt")]
+    pub rtt_channel_name: Range<usize>,
     /// RTT log data resides here.
     #[cfg(feature = "rtt")]
     pub rtt_buffer: Range<usize>,
@@ -182,7 +185,8 @@ pub struct Memory {
 /// Memory allocations associated with the logger that may need special treatment.
 ///
 /// Any of these that are placed in memory with caching support should
-/// be configured as non-cacheable for the logger to work properly.
+/// be configured as non-cacheable before calling `init` for the logger
+/// to work properly.
 ///
 /// The configuration of this is chip-dependent, but will typically
 /// involve configuring an MPU.
@@ -191,6 +195,8 @@ pub fn memory() -> Result<Memory, InitError> {
         persist: get_persist_memory_from_symbols()?,
         #[cfg(feature = "rtt")]
         rtt_header: logger::rtt::rtt_header_memory(),
+        #[cfg(feature = "rtt")]
+        rtt_channel_name: logger::rtt::rtt_channel_name_memory(),
         #[cfg(feature = "rtt")]
         rtt_buffer: logger::rtt::rtt_buffer_memory(),
     })

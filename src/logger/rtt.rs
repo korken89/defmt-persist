@@ -67,6 +67,12 @@ pub(crate) fn rtt_header_memory() -> Range<usize> {
     start..end
 }
 
+pub(crate) fn rtt_channel_name_memory() -> Range<usize> {
+    let start = &raw const NAME as usize;
+    let end = start + NAME.len();
+    start..end
+}
+
 pub(crate) fn rtt_buffer_memory() -> Range<usize> {
     let start = &raw const BUFFER as usize;
     let end = start + size_of::<UnsafeBuffer>();
