@@ -3,10 +3,11 @@
 pub mod uart;
 
 use core::future::Future;
+use core::ops::Range;
 use core::pin::pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use cortex_m_semihosting::debug::{self, EXIT_FAILURE, EXIT_SUCCESS};
-use defmt_persist::Consumer;
+use defmt_persist::{Consumer, Identifier};
 
 pub use cortex_m_rt::entry;
 
@@ -30,6 +31,35 @@ pub fn drain_to_uart(consumer: &mut Consumer<'_>) {
         uart::write_bytes(buf1);
         uart::write_bytes(buf2);
         data.release_all();
+    }
+}
+
+/// Drain all data via UART0, with a log line before the data of each firmware.
+pub fn drain_with_identifiers<'c>(consumer: &mut Consumer<'c>) {
+    // Copy out everything first, so the log lines don't mix with the data.
+    let mut data = [0; 1024];
+    let mut grants: [Option<(&'c Identifier, Range<usize>)>; 8] = Default::default();
+    let mut len = 0;
+    for grant_slot in &mut grants {
+        if consumer.is_empty() {
+            break;
+        }
+        let grant = consumer.read();
+        let start = len;
+        let (buf1, buf2) = grant.bufs();
+        for buf in [buf1, buf2] {
+            data[len..len + buf.len()].copy_from_slice(buf);
+            len += buf.len();
+        }
+        *grant_slot = Some((grant.identifier(), start..len));
+        grant.release_all();
+    }
+    assert!(consumer.is_empty(), "more grants than slots");
+
+    for (identifier, range) in grants.into_iter().flatten() {
+        defmt::info!("data from {:?}:", identifier);
+        drain_to_uart(consumer);
+        uart::write_bytes(&data[range]);
     }
 }
 

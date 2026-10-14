@@ -1,0 +1,12 @@
+=== Run 1 ===
+
+=== Run 2 ===
+
+=== Run 3 ===
+[INFO ] data from Identifier([10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10]):
+[INFO ] phase 1: recovered None
+[INFO ] phase 1: logged by Identifier([10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10])
+[INFO ] data from Identifier([11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11]):
+[INFO ] phase 2: recovered Some(Identifier([10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10]))
+[INFO ] phase 2: logged by Identifier([11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11])
+[INFO ] phase 3: recovered Some(Identifier([11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11]))
