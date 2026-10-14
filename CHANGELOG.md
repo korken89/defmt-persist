@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ### Changed
 
+- **Breaking:** `init` takes an `Identifier`
+
 ## v0.1.0
 
 ### Added

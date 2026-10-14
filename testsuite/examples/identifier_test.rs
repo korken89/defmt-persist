@@ -14,7 +14,7 @@ use testsuite::{drain_to_uart, dump_persist_region, entry, exit_failure, exit_su
 
 const PHASE1_ID: Identifier = Identifier([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
 const PHASE2_ID: Identifier = Identifier([
-    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 26, 27, 28, 29, 30, 31,
+    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
 ]);
 
 #[entry]

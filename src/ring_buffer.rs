@@ -72,7 +72,7 @@ pub struct Producer<'a> {
 /// With the `async-await` feature, use [`Consumer::wait_for_data`] to asynchronously
 /// wait for new data to be available.
 pub struct Consumer<'a> {
-    pub(crate) header: &'a RingBuffer,
+    header: &'a RingBuffer,
     buf: &'a [UnsafeCell<MaybeUninit<u8>>],
 }
 

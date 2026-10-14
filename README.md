@@ -46,7 +46,9 @@ __defmt_persist_end   = ORIGIN(DEFMT_PERSIST) + LENGTH(DEFMT_PERSIST);
 Then call `init` early in your program:
 
 ```rust,ignore
-let Ok(metadata) = defmt_persist::init(Default::default()) else {
+// For example a hash of the firmware image.
+let id = defmt_persist::Identifier(firmware_hash());
+let Ok(metadata) = defmt_persist::init(id) else {
     panic!("init failed");
 };
 let mut consumer = metadata.consumer;
