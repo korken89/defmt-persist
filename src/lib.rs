@@ -3,11 +3,12 @@
 #![doc = include_str!("../README.md")]
 
 use core::mem::{align_of, size_of};
+use core::ops::Range;
 use core::sync::atomic::{AtomicBool, Ordering};
 use ring_buffer::RingBuffer;
 #[cfg(feature = "qemu-test")]
 pub use ring_buffer::offsets;
-pub use ring_buffer::{Consumer, GrantR};
+pub use ring_buffer::{Consumer, GrantR, Identifier};
 
 #[cfg(feature = "async-await")]
 pub(crate) mod atomic_waker;
@@ -37,13 +38,28 @@ pub struct ConsumerAndMetadata<'a> {
     /// different decoders need to be used. This field helps identify the
     /// data that was definitely produced by the current firmware.
     pub recovered_logs_len: usize,
+    /// The identifier for the firmware that generated the recovered logs.
+    pub recovered_identifier: Option<Identifier>,
 }
+
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Initialize the logger.
 ///
 /// This reads the buffer region from the linker symbols `__defmt_persist_start` and
 /// `__defmt_persist_end`. Define these in your linker script to reserve memory for
 /// the persist buffer.
+///
+/// # Identifier
+///
+/// Use the identifier to detect if recovered logs were produced by a different firmware
+/// version. The returned [`ConsumerAndMetadata`] contains both:
+/// - `recovered_identifier`: The identifier from before this call (previous firmware)
+/// - `consumer.identifier()`: The new identifier set by this call (current firmware)
+///
+/// A common approach is to hash the firmware flash content using a simple hash function
+/// like FNV-1a. Use a hash with enough output bits to avoid collisions between firmware
+/// versions.
 ///
 /// # Errors
 ///
@@ -61,17 +77,75 @@ pub struct ConsumerAndMetadata<'a> {
 ///
 /// Corrupt memory may be accepted as valid. While index bounds are validated,
 /// the data content is not. Treat recovered logs as untrusted external input.
-pub fn init() -> Result<ConsumerAndMetadata<'static>, InitError> {
+pub fn init(new_identifier: Identifier) -> Result<ConsumerAndMetadata<'static>, InitError> {
+    if INITIALIZED.swap(true, Ordering::SeqCst) {
+        return Err(InitError::AlreadyInitialized);
+    }
+
+    let memory = memory_from_symbols()?;
+
+    // SAFETY:
+    // - Linker symbols provide the memory region.
+    // - The atomic swap above guarantees this code runs exactly once, ensuring exclusive ownership.
+    // - Alignment and size are validated by memory_from_symbols.
+    let (p, mut c, old_identifier) =
+        unsafe { RingBuffer::recover_or_reinitialize(memory, new_identifier) };
+
+    let recovered_logs_len = {
+        let grant = c.read();
+        let (buf1, buf2) = grant.bufs();
+        buf1.len() + buf2.len()
+    };
+
+    // SAFETY: The atomic swap guarantees this is called only once.
+    unsafe { logger::LOGGER_STATE.initialize(p) };
+
+    Ok(ConsumerAndMetadata {
+        consumer: c,
+        recovered_logs_len,
+        recovered_identifier: old_identifier,
+    })
+}
+
+/// Read the identifier without going through initialization.
+///
+/// If the header indicates that the identifier is garbage, `None` is
+/// returned.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - [`InitError::AlreadyInitialized`]: Called after [`init`]
+/// - [`InitError::BadAlignment`]: Memory region is not properly aligned
+/// - [`InitError::TooSmall`]: Memory region is too small for the header plus data
+/// - [`InitError::TooLarge`]: Buffer size would overflow pointer arithmetic
+pub fn peek_identifier() -> Result<Option<Identifier>, InitError> {
+    let memory = memory_from_symbols()?;
+
+    // Block `init` from taking the memory for the duration of this
+    // function. The mechanism is a bit clunky, but if someone managed
+    // to concurrently call peek and init, this will produce a
+    // surprising error instead of memory unsafety.
+    if INITIALIZED.swap(true, Ordering::SeqCst) {
+        return Err(InitError::AlreadyInitialized);
+    }
+
+    // SAFETY:
+    // - Linker symbols provide the memory region.
+    // - The atomic swap above guarantees this code has exclusive ownership.
+    // - Alignment and size are validated by memory_from_symbols.
+    let v = unsafe { RingBuffer::peek_identifier(memory) };
+
+    INITIALIZED.store(false, Ordering::SeqCst);
+
+    Ok(v)
+}
+
+fn memory_from_symbols() -> Result<Range<usize>, InitError> {
     // SAFETY: These symbols are provided by the linker script and point to a reserved memory region.
     unsafe extern "C" {
         static __defmt_persist_start: u8;
         static __defmt_persist_end: u8;
-    }
-
-    static INITIALIZED: AtomicBool = AtomicBool::new(false);
-
-    if INITIALIZED.swap(true, Ordering::SeqCst) {
-        return Err(InitError::AlreadyInitialized);
     }
 
     let start = (&raw const __defmt_persist_start).expose_provenance();
@@ -89,23 +163,5 @@ pub fn init() -> Result<ConsumerAndMetadata<'static>, InitError> {
         return Err(InitError::TooLarge);
     }
 
-    // SAFETY:
-    // - Linker symbols provide the memory region.
-    // - The atomic swap above guarantees this code runs exactly once, ensuring exclusive ownership.
-    // - Alignment and size are validated above.
-    let (p, mut c) = unsafe { RingBuffer::recover_or_reinitialize(memory) };
-
-    // SAFETY: The atomic swap guarantees this is called only once.
-    unsafe { logger::LOGGER_STATE.initialize(p) };
-
-    let recovered_logs_len = {
-        let grant = c.read();
-        let (buf1, buf2) = grant.bufs();
-        buf1.len() + buf2.len()
-    };
-
-    Ok(ConsumerAndMetadata {
-        consumer: c,
-        recovered_logs_len,
-    })
+    Ok(memory)
 }

@@ -36,6 +36,8 @@ pub struct RingBuffer {
     /// In particular, this means that the reader-owned part of the buffer
     /// contains real data.
     header: u128,
+    /// This contains the marker which identifies the buffer contents.
+    identifier: Identifier,
     /// Where the next read starts.
     ///
     /// The RingBuffer always guarantees `read < len`.
@@ -49,6 +51,12 @@ pub struct RingBuffer {
     #[cfg(feature = "ecc")]
     _ecc_flush: UnsafeCell<u64>,
 }
+
+/// Identifier for the firmware that generated a log. It's up
+/// to the implementer to use as many bytes as they deem necessary.
+#[repr(transparent)]
+#[derive(Clone, defmt::Format, Debug, PartialEq, Eq, Default)]
+pub struct Identifier(pub [u8; 16]);
 
 /// Writes data into the buffer.
 pub struct Producer<'a> {
@@ -79,9 +87,9 @@ unsafe impl Send for Consumer<'_> {}
 /// Replace this if the layout or field semantics change in a backwards-incompatible way.
 /// The `ecc` layout uses a different magic to force reinitialization when switching.
 #[cfg(not(feature = "ecc"))]
-const MAGIC: u128 = 0xb528_c25f_90c6_16af_cbc1_502c_09c1_fd6e;
+const MAGIC: u128 = 0xcd6f_a223_a2d9_29e5_2329_b0b4_5235_fb83;
 #[cfg(feature = "ecc")]
-const MAGIC: u128 = 0x1dff_2060_27b9_f2b4_a194_1013_69cd_3c6c;
+const MAGIC: u128 = 0x3b50_0bf7_63b0_a8eb_d3f8_de4c_ab9e_9655;
 
 /// Field offsets for corruption testing.
 #[cfg(feature = "qemu-test")]
@@ -105,6 +113,7 @@ impl RingBuffer {
     pub(crate) fn new(read: u32, write: u32) -> Self {
         RingBuffer {
             header: MAGIC,
+            identifier: Identifier([0; 16]),
             read: AtomicU32::new(read),
             write: AtomicU32::new(write),
             #[cfg(feature = "ecc")]
@@ -116,7 +125,7 @@ impl RingBuffer {
     ///
     /// No-op when `ecc` feature is disabled.
     #[inline]
-    fn flush_ecc(&self) {
+    pub(crate) fn flush_ecc(&self) {
         #[cfg(feature = "ecc")]
         {
             // Ensure previous writes are emitted before the volatile write.
@@ -156,10 +165,123 @@ impl RingBuffer {
     /// input and do not rely on its value for memory safety.
     pub(crate) unsafe fn recover_or_reinitialize(
         memory: Range<usize>,
-    ) -> (Producer<'static>, Consumer<'static>) {
-        let v: *mut Self = ptr::with_exposed_provenance_mut(memory.start);
+        new_identifier: Identifier,
+    ) -> (Producer<'static>, Consumer<'static>, Option<Identifier>) {
+        let old_identifier;
         let buf_len = memory.len() - size_of::<RingBuffer>();
 
+        // SAFETY: This function's safety contract is a superset of the callee's.
+        let v = match unsafe { Self::validate_header(&memory) } {
+            HeaderValidation::Bad(v) => {
+                v.read.store(0, Ordering::Relaxed);
+                // The intermediate state doesn't matter until header == MAGIC
+                v.write.store(0, Ordering::Relaxed);
+                let identifier = ptr::from_mut(&mut v.identifier);
+                // SAFETY: `identifier` points to a valid, aligned field.
+                unsafe { identifier.write_volatile(new_identifier) };
+                v.flush_ecc();
+
+                // The identifier must be in memory before the header claims it
+                // is valid, otherwise a reset in between recovers garbage.
+                fence(Ordering::SeqCst);
+                let header = ptr::from_mut(&mut v.header);
+                // SAFETY: A regular assignment to v.header would be safe
+                // here, but is not guaranteed to actually update memory. This
+                // must mean the pointer is valid for writes and properly
+                // aligned.
+                unsafe { header.write_volatile(MAGIC) };
+                old_identifier = None;
+                v
+            }
+            HeaderValidation::Good(v) => {
+                // The header promised to keep the contract, but we don't
+                // trust it for the safety of our pointer offsets.
+                let write = v.write.load(Ordering::Relaxed) as usize;
+                let read = v.read.load(Ordering::Relaxed) as usize;
+                let read_ok = read < buf_len;
+                let write_ok = write < buf_len;
+                // Since `header` is already marked as valid, some extra care
+                // is taken here to avoid situations where there is a gap of time
+                // where both indexes are in-bounds, but not valid. Otherwise
+                // a poorly timed reset could leave the queue in a state that
+                // appears valid and non-empty.
+                match (read_ok, write_ok) {
+                    (true, true) => {}
+                    (true, false) => v.write.store(read as u32, Ordering::Relaxed),
+                    (false, true) => v.read.store(write as u32, Ordering::Relaxed),
+                    (false, false) => {
+                        v.read.store(0, Ordering::Relaxed);
+                        // write is still invalid between these operations
+                        v.write.store(0, Ordering::Relaxed);
+                    }
+                };
+
+                let identifier = ptr::from_mut(&mut v.identifier);
+                // SAFETY: `identifier` points to a valid, aligned field.
+                old_identifier = Some(unsafe { identifier.read_volatile() });
+                if old_identifier.as_ref() != Some(&new_identifier) {
+                    // Temporarily invalidate the header during the
+                    // non-atomic write to identifier, otherwise a reset in
+                    // between recovers garbage.
+                    fence(Ordering::SeqCst);
+                    let header = ptr::from_mut(&mut v.header);
+                    // SAFETY: A regular assignment to v.header would be safe
+                    // here, but is not guaranteed to actually update memory. This
+                    // must mean the pointer is valid for writes and properly
+                    // aligned.
+                    unsafe { header.write_volatile(0) };
+                    v.flush_ecc();
+                    fence(Ordering::SeqCst);
+
+                    // SAFETY: `identifier` points to a valid, aligned field.
+                    unsafe { identifier.write_volatile(new_identifier) };
+
+                    v.flush_ecc();
+                    fence(Ordering::SeqCst);
+                    // SAFETY: A regular assignment to v.header would be safe
+                    // here, but is not guaranteed to actually update memory. This
+                    // must mean the pointer is valid for writes and properly
+                    // aligned.
+                    unsafe { header.write_volatile(MAGIC) };
+                }
+
+                v
+            }
+        };
+        v.flush_ecc();
+        fence(Ordering::SeqCst);
+
+        // SAFETY:
+        // - The caller guarantees at least 1 byte of space left in the allocated area.
+        // - There are no alignment requirements on the values in the buffer.
+        // - There is no mutable aliasing, all slices made from this buffer are immutable - writes
+        //   are made via the `UnsafeCell`s interior mutability.
+        let buf: &[UnsafeCell<MaybeUninit<u8>>] = unsafe {
+            slice::from_raw_parts(
+                ptr::with_exposed_provenance(memory.start + size_of::<RingBuffer>()),
+                buf_len,
+            )
+        };
+
+        // SAFETY: The caller guarantees buf.len() < i32::MAX / 4.
+        let (p, c) = unsafe { v.split(buf) };
+
+        (p, c, old_identifier)
+    }
+
+    /// Validates the header against known-good MAGIC.
+    ///
+    /// A mutable reference is handed out either way so it can be
+    /// brought to a good state.
+    ///
+    /// # Safety
+    ///
+    /// - `memory.start` must be aligned to `align_of::<RingBuffer>()`.
+    /// - `memory.len()` must be greater than `size_of::<RingBuffer>()`.
+    /// - Buffer size (`memory.len() - size_of::<RingBuffer>()`) must be less than
+    ///   `i32::MAX / 4` to avoid overflow in pointer arithmetic.
+    unsafe fn validate_header<'a>(memory: &Range<usize>) -> HeaderValidation<'a> {
+        let v: *mut Self = ptr::with_exposed_provenance_mut(memory.start);
         // SAFETY:
         // - Alignment is guaranteed by the caller.
         // - Size is guaranteed by the caller.
@@ -176,57 +298,30 @@ impl RingBuffer {
         // SAFETY: A regular read from v.header would be safe here, but it would maybe be
         // optimizsed away.
         if unsafe { header.read_volatile() } != MAGIC {
-            v.read.store(0, Ordering::Relaxed);
-            // The intermediate state doesn't matter until header == MAGIC
-            v.write.store(0, Ordering::Relaxed);
-            v.flush_ecc();
-
-            fence(Ordering::SeqCst);
-            // SAFETY: A regular assignment to v.header would be safe
-            // here, but is not guaranteed to actually update memory. This
-            // must mean the pointer is valid for writes and properly
-            // aligned.
-            unsafe { header.write_volatile(MAGIC) };
+            HeaderValidation::Bad(v)
         } else {
-            // The header promised to keep the contract, but we don't
-            // trust it for the safety of our pointer offsets.
-            let write = v.write.load(Ordering::Relaxed) as usize;
-            let read = v.read.load(Ordering::Relaxed) as usize;
-            let read_ok = read < buf_len;
-            let write_ok = write < buf_len;
-            // Since `header` is already marked as valid, some extra care
-            // is taken here to avoid situations where there is a gap of time
-            // where both indexes are in-bounds, but not valid. Otherwise
-            // a poorly timed reset could leave the queue in a state that
-            // appears valid and non-empty.
-            match (read_ok, write_ok) {
-                (true, true) => {}
-                (true, false) => v.write.store(read as u32, Ordering::Relaxed),
-                (false, true) => v.read.store(write as u32, Ordering::Relaxed),
-                (false, false) => {
-                    v.read.store(0, Ordering::Relaxed);
-                    // write is still invalid between these operations
-                    v.write.store(0, Ordering::Relaxed);
-                }
-            };
-            v.flush_ecc();
+            HeaderValidation::Good(v)
         }
-        fence(Ordering::SeqCst);
+    }
 
-        // SAFETY:
-        // - The caller guarantees at least 1 byte of space left in the allocated area.
-        // - There are no alignment requirements on the values in the buffer.
-        // - There is no mutable aliasing, all slices made from this buffer are immutable - writes
-        //   are made via the `UnsafeCell`s interior mutability.
-        let buf: &[UnsafeCell<MaybeUninit<u8>>] = unsafe {
-            slice::from_raw_parts(
-                ptr::with_exposed_provenance(memory.start + size_of::<RingBuffer>()),
-                buf_len,
-            )
-        };
-
-        // SAFETY: The caller guarantees buf.len() < i32::MAX / 4.
-        unsafe { v.split(buf) }
+    /// # Safety
+    ///
+    /// - `memory.start` must be aligned to `align_of::<RingBuffer>()`.
+    /// - `memory.len()` must be greater than `size_of::<RingBuffer>()`.
+    /// - Buffer size (`memory.len() - size_of::<RingBuffer>()`) must be less than
+    ///   `i32::MAX / 4` to avoid overflow in pointer arithmetic.
+    /// - No other access to `memory` for the duration of the function call.
+    pub(crate) unsafe fn peek_identifier(memory: Range<usize>) -> Option<Identifier> {
+        // SAFETY: The safety contract is reexported.
+        match unsafe { Self::validate_header(&memory) } {
+            HeaderValidation::Good(ring_buffer) => {
+                let p = ptr::from_mut(&mut ring_buffer.identifier);
+                // SAFETY: `identifier` points to a valid, aligned field within the RingBuffer.
+                let identifier = unsafe { p.read_volatile() };
+                Some(identifier)
+            }
+            HeaderValidation::Bad(_ring_buffer) => None,
+        }
     }
 
     /// Splits the queue into producer and consumer given a memory area.
@@ -244,6 +339,11 @@ impl RingBuffer {
             Consumer { header: self, buf },
         )
     }
+}
+
+enum HeaderValidation<'a> {
+    Good(&'a mut RingBuffer),
+    Bad(&'a mut RingBuffer),
 }
 
 impl Producer<'_> {
@@ -338,6 +438,15 @@ impl Producer<'_> {
 }
 
 impl Consumer<'_> {
+    /// Access the current identifier (as set by [`init`](crate::init)).
+    ///
+    /// This returns the identifier set by `init()`, not the identifier
+    /// of the firmware that produced the recovered logs. For that, use
+    /// [`ConsumerAndMetadata::recovered_identifier`](crate::ConsumerAndMetadata::recovered_identifier).
+    pub fn identifier(&self) -> &Identifier {
+        &self.header.identifier
+    }
+
     /// Returns `true` if there is no data available to read.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -444,8 +553,8 @@ impl Consumer<'_> {
 
 /// A read grant providing access to buffered data.
 ///
-/// Obtained from [`Consumer::read`]. The grant provides a slice of available data
-/// via [`GrantR::buf`]. When done reading, call [`GrantR::release`] to mark bytes
+/// Obtained from [`Consumer::read`]. The grant provides slices of available data
+/// via [`GrantR::bufs`]. When done reading, call [`GrantR::release`] to mark bytes
 /// as consumed and free space for new writes.
 ///
 /// If the grant is dropped without calling `release`, no data is consumed.
