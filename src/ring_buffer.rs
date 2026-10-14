@@ -219,8 +219,31 @@ impl RingBuffer {
                 let identifier = ptr::from_mut(&mut v.identifier);
                 // SAFETY: `identifier` points to a valid, aligned field.
                 old_identifier = Some(unsafe { identifier.read_volatile() });
-                // SAFETY: `identifier` points to a valid, aligned field.
-                unsafe { identifier.write_volatile(new_identifier) };
+                if old_identifier.as_ref() != Some(&new_identifier) {
+                    // Temporarily invalidate the header during the
+                    // non-atomic write to identifier, otherwise a reset in
+                    // between recovers garbage.
+                    fence(Ordering::SeqCst);
+                    let header = ptr::from_mut(&mut v.header);
+                    // SAFETY: A regular assignment to v.header would be safe
+                    // here, but is not guaranteed to actually update memory. This
+                    // must mean the pointer is valid for writes and properly
+                    // aligned.
+                    unsafe { header.write_volatile(0) };
+                    v.flush_ecc();
+                    fence(Ordering::SeqCst);
+
+                    // SAFETY: `identifier` points to a valid, aligned field.
+                    unsafe { identifier.write_volatile(new_identifier) };
+
+                    v.flush_ecc();
+                    fence(Ordering::SeqCst);
+                    // SAFETY: A regular assignment to v.header would be safe
+                    // here, but is not guaranteed to actually update memory. This
+                    // must mean the pointer is valid for writes and properly
+                    // aligned.
+                    unsafe { header.write_volatile(MAGIC) };
+                }
 
                 v
             }
