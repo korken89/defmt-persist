@@ -9,7 +9,7 @@
 #![no_std]
 #![no_main]
 
-use defmt_persist::{ConsumerAndMetadata, Identifier};
+use defmt_persist::Identifier;
 use testsuite::{drain_to_uart, dump_persist_region, entry, exit_failure, exit_success};
 
 const PHASE1_ID: Identifier = Identifier([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
@@ -19,18 +19,14 @@ const PHASE2_ID: Identifier = Identifier([
 
 #[entry]
 fn main() -> ! {
-    let old_id = defmt_persist::peek_identifier().unwrap();
-    let new_id = if old_id.is_none() {
+    let recovered_identifier = defmt_persist::peek_identifier().unwrap();
+    let new_id = if recovered_identifier.is_none() {
         PHASE1_ID
     } else {
         PHASE2_ID
     };
 
-    let ConsumerAndMetadata {
-        mut consumer,
-        recovered_logs_len: _,
-        recovered_identifier,
-    } = defmt_persist::init(new_id).unwrap();
+    let mut consumer = defmt_persist::init(new_id).unwrap();
 
     defmt::info!("recovered_identifier: {:?}", recovered_identifier);
     defmt::info!("current_identifier: {:?}", consumer.identifier());

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Added support for a persistent firmware identifier to help hosts identify the running binary and select the correct ELF for decoding.
 - Provide list of caching-sensitive memory
 - Iterate over caching-sensitive memory
+- `GrantR::identifier` to tell recovered logs from different firmwares apart
 
 ### Fixed
 
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Changed
 
 - **Breaking:** `init` takes an `Identifier`
+- **Breaking:** `init` returns `Consumer`, `ConsumerAndMetadata` is removed
 
 ## v0.1.0
 

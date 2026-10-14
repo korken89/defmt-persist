@@ -28,23 +28,9 @@ pub enum InitError {
     TooLarge,
 }
 
-/// Holds the log reader and some additional information from initialization.
-pub struct ConsumerAndMetadata<'a> {
-    /// Reads logs from the buffer.
-    pub consumer: Consumer<'a>,
-    /// Number of bytes that were not from the current run.
-    ///
-    /// If the recovered logs were produced by a different firmware,
-    /// different decoders need to be used. This field helps identify the
-    /// data that was definitely produced by the current firmware.
-    pub recovered_logs_len: usize,
-    /// The identifier for the firmware that generated the recovered logs.
-    pub recovered_identifier: Option<Identifier>,
-}
-
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Initialize the logger.
+/// Initialize the logger and return the reader of the logs.
 ///
 /// This reads the buffer region from the linker symbols `__defmt_persist_start` and
 /// `__defmt_persist_end`. Define these in your linker script to reserve memory for
@@ -52,10 +38,14 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 ///
 /// # Identifier
 ///
-/// Use the identifier to detect if recovered logs were produced by a different firmware
-/// version. The returned [`ConsumerAndMetadata`] contains both:
-/// - `recovered_identifier`: The identifier from before this call (previous firmware)
-/// - `consumer.identifier()`: The new identifier set by this call (current firmware)
+/// The identifier tells which firmware wrote the logs, so the host can pick the right ELF to
+/// decode them with.
+///
+/// The buffer keeps track of which firmware wrote which data, also across several resets and
+/// when both a bootloader and an application log. Every [`GrantR`] only holds data from one
+/// firmware, see [`GrantR::identifier`]. Up to 8 segments are tracked, and a new one starts each
+/// time a different firmware logs, so a bootloader and an application that both log start two
+/// per boot. When more are needed, the unread data of the oldest segment is dropped.
 ///
 /// A common approach is to hash the firmware flash content using a simple hash function
 /// like FNV-1a. Use a hash with enough output bits to avoid collisions between firmware
@@ -77,7 +67,7 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 ///
 /// Corrupt memory may be accepted as valid. While index bounds are validated,
 /// the data content is not. Treat recovered logs as untrusted external input.
-pub fn init(new_identifier: Identifier) -> Result<ConsumerAndMetadata<'static>, InitError> {
+pub fn init(new_identifier: Identifier) -> Result<Consumer<'static>, InitError> {
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         return Err(InitError::AlreadyInitialized);
     }
@@ -88,25 +78,18 @@ pub fn init(new_identifier: Identifier) -> Result<ConsumerAndMetadata<'static>, 
     // - Linker symbols provide the memory region.
     // - The atomic swap above guarantees this code runs exactly once, ensuring exclusive ownership.
     // - Alignment and size are validated by get_persist_memory_from_symbols.
-    let (p, c, old_identifier) =
-        unsafe { RingBuffer::recover_or_reinitialize(memory, new_identifier) };
-
-    let recovered_logs_len = c.len();
+    let (p, c) = unsafe { RingBuffer::recover_or_reinitialize(memory, new_identifier) };
 
     // SAFETY: The atomic swap guarantees this is called only once.
     unsafe { logger::LOGGER_STATE.initialize(p) };
 
-    Ok(ConsumerAndMetadata {
-        consumer: c,
-        recovered_logs_len,
-        recovered_identifier: old_identifier,
-    })
+    Ok(c)
 }
 
-/// Read the identifier without going through initialization.
+/// Read the identifier of the firmware that ran last, without going through initialization.
 ///
-/// If the header indicates that the identifier is garbage, `None` is
-/// returned.
+/// Call this before [`init`] to see what ran before. If the header indicates that the
+/// identifier is garbage, `None` is returned.
 ///
 /// # Errors
 ///

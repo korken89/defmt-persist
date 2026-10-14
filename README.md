@@ -48,14 +48,14 @@ Then call `init` early in your program:
 ```rust,ignore
 // For example a hash of the firmware image.
 let id = defmt_persist::Identifier(firmware_hash());
-let Ok(metadata) = defmt_persist::init(id) else {
+let Ok(mut consumer) = defmt_persist::init(id) else {
     panic!("init failed");
 };
-let mut consumer = metadata.consumer;
 ```
 
-The argument to `init` is an identifier to store. Use `metadata.recovered_identifier` to check
-if logs were produced by a different firmware version.
+The argument to `init` is an identifier to store. The recovered logs can span several firmware
+versions. Use `GrantR::identifier` to see which one wrote the data in a grant. To see which
+firmware ran before, call `peek_identifier` before `init`.
 
 Use the returned `Consumer` to read and transmit buffered logs:
 
@@ -97,6 +97,9 @@ If your system uses a bootloader, the bootloader's linker script must also reser
 the same memory region. Otherwise, the bootloader may use this memory for its stack or heap,
 corrupting the persisted logs before the application starts. The bootloader can also call
 `init` to read and transmit persisted logs from the application before launching it.
+
+The bootloader and the application must use the same version of `defmt-persist` with the same
+`ecc` setting. Otherwise they reinitialize each other's buffer on every boot.
 
 ## Features
 

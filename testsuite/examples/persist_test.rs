@@ -13,8 +13,7 @@ use testsuite::{drain_to_uart, dump_persist_region, entry, exit_failure, exit_su
 
 #[entry]
 fn main() -> ! {
-    let metadata = defmt_persist::init(Default::default()).unwrap();
-    let mut consumer = metadata.consumer;
+    let mut consumer = defmt_persist::init(Default::default()).unwrap();
 
     if !consumer.is_empty() {
         // Phase 2: Read recovered logs.
