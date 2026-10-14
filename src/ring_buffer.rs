@@ -125,7 +125,7 @@ impl RingBuffer {
     ///
     /// No-op when `ecc` feature is disabled.
     #[inline]
-    pub(crate) fn flush_ecc(&self) {
+    fn flush_ecc(&self) {
         #[cfg(feature = "ecc")]
         {
             // Ensure previous writes are emitted before the volatile write.
@@ -167,86 +167,53 @@ impl RingBuffer {
         memory: Range<usize>,
         new_identifier: Identifier,
     ) -> (Producer<'static>, Consumer<'static>, Option<Identifier>) {
-        let old_identifier;
         let buf_len = memory.len() - size_of::<RingBuffer>();
 
         // SAFETY: This function's safety contract is a superset of the callee's.
-        let v = match unsafe { Self::validate_header(&memory) } {
-            HeaderValidation::Bad(v) => {
-                v.read.store(0, Ordering::Relaxed);
-                // The intermediate state doesn't matter until header == MAGIC
-                v.write.store(0, Ordering::Relaxed);
-                let identifier = ptr::from_mut(&mut v.identifier);
-                // SAFETY: `identifier` points to a valid, aligned field.
-                unsafe { identifier.write_volatile(new_identifier) };
-                v.flush_ecc();
+        let v = unsafe { Self::from_memory(&memory) };
+        let old_identifier = if !v.header_valid() {
+            v.read.store(0, Ordering::Relaxed);
+            // The intermediate state doesn't matter until header == MAGIC
+            v.write.store(0, Ordering::Relaxed);
+            v.write_identifier(new_identifier);
 
-                // The identifier must be in memory before the header claims it
-                // is valid, otherwise a reset in between recovers garbage.
-                fence(Ordering::SeqCst);
-                let header = ptr::from_mut(&mut v.header);
-                // SAFETY: A regular assignment to v.header would be safe
-                // here, but is not guaranteed to actually update memory. This
-                // must mean the pointer is valid for writes and properly
-                // aligned.
-                unsafe { header.write_volatile(MAGIC) };
-                old_identifier = None;
-                v
-            }
-            HeaderValidation::Good(v) => {
-                // The header promised to keep the contract, but we don't
-                // trust it for the safety of our pointer offsets.
-                let write = v.write.load(Ordering::Relaxed) as usize;
-                let read = v.read.load(Ordering::Relaxed) as usize;
-                let read_ok = read < buf_len;
-                let write_ok = write < buf_len;
-                // Since `header` is already marked as valid, some extra care
-                // is taken here to avoid situations where there is a gap of time
-                // where both indexes are in-bounds, but not valid. Otherwise
-                // a poorly timed reset could leave the queue in a state that
-                // appears valid and non-empty.
-                match (read_ok, write_ok) {
-                    (true, true) => {}
-                    (true, false) => v.write.store(read as u32, Ordering::Relaxed),
-                    (false, true) => v.read.store(write as u32, Ordering::Relaxed),
-                    (false, false) => {
-                        v.read.store(0, Ordering::Relaxed);
-                        // write is still invalid between these operations
-                        v.write.store(0, Ordering::Relaxed);
-                    }
-                };
-
-                let identifier = ptr::from_mut(&mut v.identifier);
-                // SAFETY: `identifier` points to a valid, aligned field.
-                old_identifier = Some(unsafe { identifier.read_volatile() });
-                if old_identifier.as_ref() != Some(&new_identifier) {
-                    // Temporarily invalidate the header during the
-                    // non-atomic write to identifier, otherwise a reset in
-                    // between recovers garbage.
-                    fence(Ordering::SeqCst);
-                    let header = ptr::from_mut(&mut v.header);
-                    // SAFETY: A regular assignment to v.header would be safe
-                    // here, but is not guaranteed to actually update memory. This
-                    // must mean the pointer is valid for writes and properly
-                    // aligned.
-                    unsafe { header.write_volatile(0) };
-                    v.flush_ecc();
-                    fence(Ordering::SeqCst);
-
-                    // SAFETY: `identifier` points to a valid, aligned field.
-                    unsafe { identifier.write_volatile(new_identifier) };
-
-                    v.flush_ecc();
-                    fence(Ordering::SeqCst);
-                    // SAFETY: A regular assignment to v.header would be safe
-                    // here, but is not guaranteed to actually update memory. This
-                    // must mean the pointer is valid for writes and properly
-                    // aligned.
-                    unsafe { header.write_volatile(MAGIC) };
+            // The identifier must be in memory before the header claims it
+            // is valid, otherwise a reset in between recovers garbage.
+            v.set_header(MAGIC);
+            None
+        } else {
+            // The header promised to keep the contract, but we don't
+            // trust it for the safety of our pointer offsets.
+            let write = v.write.load(Ordering::Relaxed) as usize;
+            let read = v.read.load(Ordering::Relaxed) as usize;
+            let read_ok = read < buf_len;
+            let write_ok = write < buf_len;
+            // Since `header` is already marked as valid, some extra care
+            // is taken here to avoid situations where there is a gap of time
+            // where both indexes are in-bounds, but not valid. Otherwise
+            // a poorly timed reset could leave the queue in a state that
+            // appears valid and non-empty.
+            match (read_ok, write_ok) {
+                (true, true) => {}
+                (true, false) => v.write.store(read as u32, Ordering::Relaxed),
+                (false, true) => v.read.store(write as u32, Ordering::Relaxed),
+                (false, false) => {
+                    v.read.store(0, Ordering::Relaxed);
+                    // write is still invalid between these operations
+                    v.write.store(0, Ordering::Relaxed);
                 }
+            };
 
-                v
+            let old_identifier = v.read_identifier();
+            if old_identifier != new_identifier {
+                // Temporarily invalidate the header during the
+                // non-atomic write to identifier, otherwise a reset in
+                // between recovers garbage.
+                v.set_header(0);
+                v.write_identifier(new_identifier);
+                v.set_header(MAGIC);
             }
+            Some(old_identifier)
         };
         v.flush_ecc();
         fence(Ordering::SeqCst);
@@ -269,10 +236,7 @@ impl RingBuffer {
         (p, c, old_identifier)
     }
 
-    /// Validates the header against known-good MAGIC.
-    ///
-    /// A mutable reference is handed out either way so it can be
-    /// brought to a good state.
+    /// Reinterprets `memory` as a `RingBuffer` without checking the header.
     ///
     /// # Safety
     ///
@@ -280,7 +244,8 @@ impl RingBuffer {
     /// - `memory.len()` must be greater than `size_of::<RingBuffer>()`.
     /// - Buffer size (`memory.len() - size_of::<RingBuffer>()`) must be less than
     ///   `i32::MAX / 4` to avoid overflow in pointer arithmetic.
-    unsafe fn validate_header<'a>(memory: &Range<usize>) -> HeaderValidation<'a> {
+    /// - No other reference to the `RingBuffer` in `memory` may be live during `'a`.
+    unsafe fn from_memory<'a>(memory: &Range<usize>) -> &'a mut Self {
         let v: *mut Self = ptr::with_exposed_provenance_mut(memory.start);
         // SAFETY:
         // - Alignment is guaranteed by the caller.
@@ -290,18 +255,42 @@ impl RingBuffer {
         //   type and buffer is sound. As the memory is initialized outside the Rust abstract
         //   machine (of the running program), we consider the caveats of non-fixed
         //   bit patterns from `MaybeUninit` mitigated.
-        // - The caller guarantees this function is called at most once during
-        //   program execution for any given `memory`, ensuring no aliasing
-        //   references exist for the `'static` lifetime.
-        let v = unsafe { &mut *v };
-        let header = ptr::from_mut(&mut v.header);
-        // SAFETY: A regular read from v.header would be safe here, but it would maybe be
-        // optimizsed away.
-        if unsafe { header.read_volatile() } != MAGIC {
-            HeaderValidation::Bad(v)
-        } else {
-            HeaderValidation::Good(v)
-        }
+        // - The caller guarantees no aliasing references exist during `'a`.
+        unsafe { &mut *v }
+    }
+
+    /// Returns `true` if the header marks the contents as initialized.
+    fn header_valid(&mut self) -> bool {
+        let header = ptr::from_mut(&mut self.header);
+        // SAFETY: A regular read from self.header would be safe here, but it
+        // could be optimized away.
+        unsafe { header.read_volatile() == MAGIC }
+    }
+
+    /// Writes `value` to the header, ordered after all previous writes.
+    fn set_header(&mut self, value: u128) {
+        self.flush_ecc();
+        fence(Ordering::SeqCst);
+        let header = ptr::from_mut(&mut self.header);
+        // SAFETY: A regular assignment to self.header would be safe here, but
+        // is not guaranteed to actually update memory.
+        unsafe { header.write_volatile(value) };
+        self.flush_ecc();
+        fence(Ordering::SeqCst);
+    }
+
+    fn read_identifier(&mut self) -> Identifier {
+        let identifier = ptr::from_mut(&mut self.identifier);
+        // SAFETY: A regular read from self.identifier would be safe here, but
+        // could be optimized away.
+        unsafe { identifier.read_volatile() }
+    }
+
+    fn write_identifier(&mut self, value: Identifier) {
+        let identifier = ptr::from_mut(&mut self.identifier);
+        // SAFETY: A regular assignment to self.identifier would be safe here,
+        // but is not guaranteed to actually update memory.
+        unsafe { identifier.write_volatile(value) };
     }
 
     /// # Safety
@@ -313,15 +302,8 @@ impl RingBuffer {
     /// - No other access to `memory` for the duration of the function call.
     pub(crate) unsafe fn peek_identifier(memory: Range<usize>) -> Option<Identifier> {
         // SAFETY: The safety contract is reexported.
-        match unsafe { Self::validate_header(&memory) } {
-            HeaderValidation::Good(ring_buffer) => {
-                let p = ptr::from_mut(&mut ring_buffer.identifier);
-                // SAFETY: `identifier` points to a valid, aligned field within the RingBuffer.
-                let identifier = unsafe { p.read_volatile() };
-                Some(identifier)
-            }
-            HeaderValidation::Bad(_ring_buffer) => None,
-        }
+        let v = unsafe { Self::from_memory(&memory) };
+        v.header_valid().then(|| v.read_identifier())
     }
 
     /// Splits the queue into producer and consumer given a memory area.
@@ -339,11 +321,6 @@ impl RingBuffer {
             Consumer { header: self, buf },
         )
     }
-}
-
-enum HeaderValidation<'a> {
-    Good(&'a mut RingBuffer),
-    Bad(&'a mut RingBuffer),
 }
 
 impl Producer<'_> {
