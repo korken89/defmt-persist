@@ -182,6 +182,40 @@ pub struct Memory {
     pub rtt_buffer: Range<usize>,
 }
 
+/// Iterator over the fields of [`Memory`].
+pub struct MemoryIter<'a> {
+    mem: &'a Memory,
+    i: usize,
+}
+
+impl<'a> Iterator for MemoryIter<'a> {
+    type Item = &'a Range<usize>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ret = match self.i {
+            0 => Some(&self.mem.persist),
+            #[cfg(feature = "rtt")]
+            1 => Some(&self.mem.rtt_header),
+            #[cfg(feature = "rtt")]
+            2 => Some(&self.mem.rtt_channel_name),
+            #[cfg(feature = "rtt")]
+            3 => Some(&self.mem.rtt_buffer),
+            _ => None,
+        };
+        self.i = self.i.saturating_add(1);
+        ret
+    }
+}
+
+impl<'a> IntoIterator for &'a Memory {
+    type Item = &'a Range<usize>;
+    type IntoIter = MemoryIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        MemoryIter { mem: self, i: 0 }
+    }
+}
+
 /// Memory allocations associated with the logger that may need special treatment.
 ///
 /// Any of these that are placed in memory with caching support should
