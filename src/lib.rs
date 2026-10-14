@@ -38,7 +38,10 @@ pub struct ConsumerAndMetadata<'a> {
     /// different decoders need to be used. This field helps identify the
     /// data that was definitely produced by the current firmware.
     pub recovered_logs_len: usize,
-    /// The identifier for the firmware that generated the recovered logs.
+    /// The identifier stored by the previous run.
+    ///
+    /// The recovered logs can also contain logs from earlier firmwares. Use
+    /// [`GrantR::identifier`] to tell them apart.
     pub recovered_identifier: Option<Identifier>,
 }
 
@@ -56,6 +59,12 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// version. The returned [`ConsumerAndMetadata`] contains both:
 /// - `recovered_identifier`: The identifier from before this call (previous firmware)
 /// - `consumer.identifier()`: The new identifier set by this call (current firmware)
+///
+/// The buffer keeps track of which firmware wrote which data, also across several resets and
+/// when both a bootloader and an application log. Every [`GrantR`] only holds data from one
+/// firmware, see [`GrantR::identifier`]. Up to 8 segments are tracked, and a new one starts each
+/// time a different firmware logs, so a bootloader and an application that both log start two
+/// per boot. When more are needed, the unread data of the oldest segment is dropped.
 ///
 /// A common approach is to hash the firmware flash content using a simple hash function
 /// like FNV-1a. Use a hash with enough output bits to avoid collisions between firmware

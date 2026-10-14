@@ -36,8 +36,18 @@ pub struct RingBuffer {
     /// In particular, this means that the reader-owned part of the buffer
     /// contains real data.
     header: u128,
-    /// This contains the marker which identifies the buffer contents.
-    identifier: Identifier,
+    /// The firmwares that wrote the buffer contents, oldest first.
+    ///
+    /// Segments `first..last` are in use, wrapping around the table. The data
+    /// of each segment ends where the next one starts, and the last one ends
+    /// at `write`. The RingBuffer always guarantees that `first..last` holds
+    /// 1 to [`SEGMENTS`] segments, and that the start of every segment except
+    /// the first lies between `read` and `write`, in order.
+    segments: [Segment; SEGMENTS],
+    /// Index of the oldest segment, modulo [`SEGMENTS`].
+    first: AtomicU32,
+    /// Index after the newest segment, modulo [`SEGMENTS`].
+    last: AtomicU32,
     /// Where the next read starts.
     ///
     /// The RingBuffer always guarantees `read < len`.
@@ -50,6 +60,13 @@ pub struct RingBuffer {
     /// An unaligned write to a different SRAM word forces the cache to commit.
     #[cfg(feature = "ecc")]
     _ecc_flush: UnsafeCell<u64>,
+}
+
+/// Data written by one firmware.
+#[repr(C)]
+struct Segment {
+    identifier: Identifier,
+    start: AtomicU32,
 }
 
 /// Identifier for the firmware that generated a log. It's up
@@ -104,6 +121,8 @@ pub struct Consumer<'a> {
 // SAFETY: Consumer can be safely sent to another thread because:
 // - Only one Consumer exists per queue (single-consumer invariant enforced by split())
 // - Atomic operations on header.read/write synchronize with the Producer
+// - After initialization only the Consumer writes header.first, and the segment
+//   identifiers and starts are not modified
 // - The UnsafeCell slice is only accessed through methods that maintain the SPSC invariant
 unsafe impl Send for Consumer<'_> {}
 
@@ -112,9 +131,15 @@ unsafe impl Send for Consumer<'_> {}
 /// Replace this if the layout or field semantics change in a backwards-incompatible way.
 /// The `ecc` layout uses a different magic to force reinitialization when switching.
 #[cfg(not(feature = "ecc"))]
-const MAGIC: u128 = 0xcd6f_a223_a2d9_29e5_2329_b0b4_5235_fb83;
+const MAGIC: u128 = 0xc543_96ee_312f_9601_4ab4_7c0d_9bb9_774e;
 #[cfg(feature = "ecc")]
-const MAGIC: u128 = 0x3b50_0bf7_63b0_a8eb_d3f8_de4c_ab9e_9655;
+const MAGIC: u128 = 0x7d25_1d3a_9333_326d_60de_302b_166d_c530;
+
+/// Number of segments, where a new one starts each time a different firmware logs.
+///
+/// A power of two, so segment indices stay consistent when they wrap around `u32`.
+const SEGMENTS: usize = 8;
+const _: () = assert!(SEGMENTS.is_power_of_two());
 
 /// Field offsets for corruption testing.
 #[cfg(feature = "qemu-test")]
@@ -138,7 +163,12 @@ impl RingBuffer {
     pub(crate) fn new(read: u32, write: u32) -> Self {
         RingBuffer {
             header: MAGIC,
-            identifier: Identifier([0; 16]),
+            segments: core::array::from_fn(|_| Segment {
+                identifier: Identifier([0; 16]),
+                start: AtomicU32::new(0),
+            }),
+            first: AtomicU32::new(0),
+            last: AtomicU32::new(1),
             read: AtomicU32::new(read),
             write: AtomicU32::new(write),
             #[cfg(feature = "ecc")]
@@ -196,29 +226,25 @@ impl RingBuffer {
 
         // SAFETY: This function's safety contract is a superset of the callee's.
         let v = unsafe { Self::from_memory(&memory) };
-        let old_identifier = if !v.header_valid() {
+        let old_identifier = if v.header_valid() && v.repair(buf_len) {
+            let old_identifier = v.newest_segment().identifier.read_volatile();
+            if old_identifier != new_identifier {
+                v.push_segment(new_identifier);
+            }
+            v.drop_read_segments();
+            Some(old_identifier)
+        } else {
+            v.set_header(0);
             v.read.store(0, Ordering::Relaxed);
-            // The intermediate state doesn't matter until header == MAGIC
             v.write.store(0, Ordering::Relaxed);
-            v.identifier.write_volatile(new_identifier);
+            v.first.store(0, Ordering::Relaxed);
+            v.last.store(1, Ordering::Relaxed);
+            v.segments[0].identifier.write_volatile(new_identifier);
 
-            // The identifier must be in memory before the header claims it
-            // is valid, otherwise a reset in between recovers garbage.
+            // Everything must be in memory before the header claims it is
+            // valid, otherwise a reset in between recovers garbage.
             v.set_header(MAGIC);
             None
-        } else {
-            v.repair(buf_len);
-
-            let old_identifier = v.identifier.read_volatile();
-            if old_identifier != new_identifier {
-                // Temporarily invalidate the header during the
-                // non-atomic write to identifier, otherwise a reset in
-                // between recovers garbage.
-                v.set_header(0);
-                v.identifier.write_volatile(new_identifier);
-                v.set_header(MAGIC);
-            }
-            Some(old_identifier)
         };
         v.flush_ecc();
         fence(Ordering::SeqCst);
@@ -282,8 +308,9 @@ impl RingBuffer {
         self.flush();
     }
 
-    /// Brings the indexes of a recovered buffer into a valid state.
-    fn repair(&mut self, buf_len: usize) {
+    /// Brings the indexes and segments of a recovered buffer into a valid
+    /// state, returning `false` if the segments can't be trusted.
+    fn repair(&mut self, buf_len: usize) -> bool {
         let (read, write) = self.repaired_indexes(buf_len);
         // Since `header` can be marked as valid, some extra care
         // is taken here to avoid situations where there is a gap of time
@@ -297,6 +324,7 @@ impl RingBuffer {
         if self.write.load(Ordering::Relaxed) as usize != write {
             self.write.store(write as u32, Ordering::Relaxed);
         }
+        self.segments_valid(read, write, buf_len)
     }
 
     /// The `read` and `write` indexes that [`Self::repair`] brings the buffer to.
@@ -313,6 +341,101 @@ impl RingBuffer {
         }
     }
 
+    /// Returns `true` if the segments describe the data between `read` and `write`.
+    fn segments_valid(&self, read: usize, write: usize, buf_len: usize) -> bool {
+        // The consumer trusts the segment starts as the end of a read, so
+        // they must lie within the readable data.
+        let readable = ring_distance(read, write, buf_len);
+        let first = self.first.load(Ordering::Relaxed);
+        let count = self.last.load(Ordering::Relaxed).wrapping_sub(first);
+        if !(1..=SEGMENTS as u32).contains(&count) {
+            return false;
+        }
+        let mut previous = 0;
+        (1..count).all(|i| {
+            let start = self
+                .segment(first.wrapping_add(i))
+                .start
+                .load(Ordering::Relaxed) as usize;
+            let distance = ring_distance(read, start, buf_len);
+            let ok = start < buf_len && previous <= distance && distance <= readable;
+            previous = distance;
+            ok
+        })
+    }
+
+    fn segment(&self, index: u32) -> &Segment {
+        &self.segments[index as usize % SEGMENTS]
+    }
+
+    fn newest_segment(&mut self) -> &mut Segment {
+        let index = self.last.load(Ordering::Relaxed).wrapping_sub(1);
+        &mut self.segments[index as usize % SEGMENTS]
+    }
+
+    /// Starts a new segment at `write`, for data from the firmware `identifier`.
+    ///
+    /// Each step is a single store, so a reset at any point leaves a valid state.
+    fn push_segment(&mut self, identifier: Identifier) {
+        let write = self.write.load(Ordering::Relaxed);
+        let first = self.first.load(Ordering::Relaxed);
+        let mut last = self.last.load(Ordering::Relaxed);
+
+        if last.wrapping_sub(first) > 1
+            && self.newest_segment().start.load(Ordering::Relaxed) == write
+        {
+            // The previous firmware did not log, so its segment can be reused.
+            last = last.wrapping_sub(1);
+            self.last.store(last, Ordering::Relaxed);
+            self.flush();
+            if self.newest_segment().identifier.read_volatile() == identifier {
+                // The firmware before it is this one, so its segment continues.
+                return;
+            }
+        }
+        if last.wrapping_sub(first) == SEGMENTS as u32 {
+            // The table is full, drop the data of the oldest firmware.
+            let second = self
+                .segment(first.wrapping_add(1))
+                .start
+                .load(Ordering::Relaxed);
+            self.read.store(second, Ordering::Relaxed);
+            self.flush();
+            self.first.store(first.wrapping_add(1), Ordering::Relaxed);
+            self.flush();
+        }
+
+        // The slot at `last` is unused until `last` moves past it.
+        let segment = &mut self.segments[last as usize % SEGMENTS];
+        segment.identifier.write_volatile(identifier);
+        segment.start.store(write, Ordering::Relaxed);
+        self.flush();
+        self.last.store(last.wrapping_add(1), Ordering::Relaxed);
+        self.flush();
+    }
+
+    /// Drops the oldest segments that have been read completely, returning the
+    /// index of the first remaining one.
+    fn drop_read_segments(&self) -> u32 {
+        let read = self.read.load(Ordering::Relaxed);
+        let last = self.last.load(Ordering::Relaxed);
+        let mut first = self.first.load(Ordering::Relaxed);
+        while last.wrapping_sub(first) > 1
+            && self
+                .segment(first.wrapping_add(1))
+                .start
+                .load(Ordering::Relaxed)
+                == read
+        {
+            first = first.wrapping_add(1);
+            // `read` must reach memory before `first`, also across a reset.
+            self.flush();
+            self.first.store(first, Ordering::Relaxed);
+            self.flush_ecc();
+        }
+        first
+    }
+
     /// Orders all previous writes before the following ones, also across a reset.
     fn flush(&self) {
         self.flush_ecc();
@@ -327,9 +450,12 @@ impl RingBuffer {
     ///   `i32::MAX / 4` to avoid overflow in pointer arithmetic.
     /// - No other access to `memory` for the duration of the function call.
     pub(crate) unsafe fn peek_identifier(memory: Range<usize>) -> Option<Identifier> {
+        let buf_len = memory.len() - size_of::<RingBuffer>();
         // SAFETY: The safety contract is reexported.
         let v = unsafe { Self::from_memory(&memory) };
-        v.header_valid().then(|| v.identifier.read_volatile())
+        let (read, write) = v.repaired_indexes(buf_len);
+        (v.header_valid() && v.segments_valid(read, write, buf_len))
+            .then(|| v.newest_segment().identifier.read_volatile())
     }
 
     /// Splits the queue into producer and consumer given a memory area.
@@ -440,14 +566,14 @@ impl Producer<'_> {
     }
 }
 
-impl Consumer<'_> {
+impl<'c> Consumer<'c> {
     /// Access the current identifier (as set by [`init`](crate::init)).
     ///
-    /// This returns the identifier set by `init()`, not the identifier
-    /// of the firmware that produced the recovered logs. For that, use
-    /// [`ConsumerAndMetadata::recovered_identifier`](crate::ConsumerAndMetadata::recovered_identifier).
-    pub fn identifier(&self) -> &Identifier {
-        &self.header.identifier
+    /// Recovered logs may have been written by an older firmware. Use
+    /// [`GrantR::identifier`] to get the identifier of the data being read.
+    pub fn identifier(&self) -> &'c Identifier {
+        let last = self.header.last.load(Ordering::Relaxed);
+        &self.header.segment(last.wrapping_sub(1)).identifier
     }
 
     /// Number of bytes available to read, including data from an older firmware.
@@ -472,25 +598,38 @@ impl Consumer<'_> {
     ///
     /// If the data available to read crosses the end of the ring, this
     /// function will provide two slices.
+    ///
+    /// A grant only holds data written by one firmware, see [`GrantR::identifier`].
     #[inline]
     #[must_use]
-    pub fn read(&mut self) -> GrantR<'_, '_> {
+    pub fn read(&mut self) -> GrantR<'_, 'c> {
+        let header = self.header;
         // Acquire: synchronizes with producer's Release store, ensuring we see the written data.
-        let write = self.header.write.load(Ordering::Acquire) as usize;
+        let write = header.write.load(Ordering::Acquire) as usize;
         // Relaxed: consumer owns `read`, no cross-thread synchronization needed.
-        let read = self.header.read.load(Ordering::Relaxed) as usize;
+        let read = header.read.load(Ordering::Relaxed) as usize;
+        // The consumer owns `first` after initialization, and `last` is fixed.
+        let first = header.drop_read_segments();
+        let last = header.last.load(Ordering::Relaxed);
+        let next = first.wrapping_add(1);
+        let end = if next == last {
+            write
+        } else {
+            header.segment(next).start.load(Ordering::Relaxed) as usize
+        };
+        let identifier = &header.segment(first).identifier;
         let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
 
-        let (len1, len2) = if write < read {
-            (self.buf.len() - read, write)
+        let (len1, len2) = if end < read {
+            (self.buf.len() - read, end)
         } else {
-            (write - read, 0)
+            (end - read, 0)
         };
 
         // SAFETY:
         // For `slice::from_raw_parts`:
         // - Non-null, valid, aligned: it is a sub-slice of `buf`,
-        //   relying on the invariants on `read` and `write`.
+        //   relying on the invariants on `read`, `write` and `segments`.
         // - Properly initialized values: The memory owned by the consumer
         //   has been initialized by the producer. When recovering the data
         //   from a previous run, we instead rely on the ability of u8 to
@@ -507,7 +646,7 @@ impl Consumer<'_> {
         //
         // For `pointer::add`:
         // - offset in bytes fits in `isize`: buf.len() fits, which is checked
-        //   before constructing a Consumer. write - read fits if write >= read,
+        //   before constructing a Consumer. end - read fits if end >= read,
         //   which holds in the cases we use it.
         // - entire memory range inside the same allocation: read < len, so the
         //   offset remains in the buffer's allocation.
@@ -515,7 +654,7 @@ impl Consumer<'_> {
         // SAFETY:
         // For `slice::from_raw_parts`:
         // - Non-null, valid, aligned: it is a sub-slice of `buf`,
-        //   relying on the invariants on `read` and `write`.
+        //   relying on the invariants on `read`, `write` and `segments`.
         // - Properly initialized values: The memory owned by the consumer
         //   has been initialized by the producer. When recovering the data
         //   from a previous run, we instead rely on the ability of u8 to
@@ -532,7 +671,7 @@ impl Consumer<'_> {
         //
         // For `pointer::add`:
         // - offset in bytes fits in `isize`: buf.len() fits, which is checked
-        //   before constructing a Consumer. write - read fits if write >= read,
+        //   before constructing a Consumer. end - read fits if end >= read,
         //   which holds in the cases we use it.
         // - entire memory range inside the same allocation: read < len, so the
         //   offset remains in the buffer's allocation.
@@ -542,6 +681,7 @@ impl Consumer<'_> {
             slice1,
             slice2,
             original_read: read,
+            identifier,
         }
     }
 
@@ -573,6 +713,7 @@ pub struct GrantR<'a, 'c> {
     slice1: &'a [u8],
     slice2: &'a [u8],
     original_read: usize,
+    identifier: &'c Identifier,
 }
 
 // SAFETY: GrantR can be safely sent to another thread because:
@@ -619,6 +760,14 @@ impl<'a, 'c> GrantR<'a, 'c> {
     pub fn bufs(&self) -> (&[u8], &[u8]) {
         (self.slice1, self.slice2)
     }
+
+    /// Identifies the firmware that wrote the bytes in this grant.
+    ///
+    /// The reference stays valid after the grant is released.
+    #[inline]
+    pub fn identifier(&self) -> &'c Identifier {
+        self.identifier
+    }
 }
 
 #[cfg(test)]
@@ -658,13 +807,20 @@ mod test {
             unsafe { RingBuffer::peek_identifier(range) }
         }
 
+        /// Offset of the start of segment slot `index`.
+        fn start_offset(index: usize) -> usize {
+            offset_of!(RingBuffer, segments)
+                + index * size_of::<Segment>()
+                + offset_of!(Segment, start)
+        }
+
         fn set_u32(&mut self, offset: usize, value: u32) {
             self.0[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
         }
     }
 
-    /// Reads everything, returning the data of each grant.
-    fn drain(c: &mut Consumer<'_>) -> Vec<Vec<u8>> {
+    /// Reads everything, returning the identifier byte and the data of each grant.
+    fn drain(c: &mut Consumer<'_>) -> Vec<(u8, Vec<u8>)> {
         let mut grants = Vec::new();
         while !c.is_empty() {
             let r = c.read();
@@ -672,10 +828,257 @@ mod test {
             let data = [buf1, buf2].concat();
             // Guards against looping forever on empty grants.
             assert!(!data.is_empty());
-            grants.push(data);
+            grants.push((r.identifier().0[0], data));
             r.release_all();
         }
         grants
+    }
+
+    #[test]
+    fn old_firmware_identified_after_another_reset() {
+        let mut m = Memory::new();
+        let (mut p, _, recovered) = m.boot(1);
+        assert_eq!(recovered, None);
+        p.write(&[1, 1]);
+
+        let (mut p, c, recovered) = m.boot(2);
+        assert_eq!(recovered, Some(Identifier([1; 16])));
+        assert_eq!(c.len(), 2);
+        p.write(&[2]);
+
+        let (_, mut c, recovered) = m.boot(2);
+        assert_eq!(recovered, Some(Identifier([2; 16])));
+        // The identifier outlives the grant.
+        let oldest = c.read().identifier();
+        assert_eq!(drain(&mut c), [(1, vec![1, 1]), (2, vec![2])]);
+        assert_eq!(oldest, &Identifier([1; 16]));
+    }
+
+    #[test]
+    fn bootloader_and_application_both_log() {
+        let mut m = Memory::new();
+        for _ in 0..2 {
+            let (mut p, _, _) = m.boot(9);
+            p.write(&[9]);
+            let (mut p, _, _) = m.boot(1);
+            p.write(&[1]);
+        }
+
+        let (_, mut c, recovered) = m.boot(9);
+        assert_eq!(recovered, Some(Identifier([1; 16])));
+        let expected = [(9, vec![9]), (1, vec![1]), (9, vec![9]), (1, vec![1])];
+        assert_eq!(drain(&mut c), expected);
+    }
+
+    #[test]
+    fn full_table_drops_oldest_data() {
+        let mut m = Memory::new();
+        for id in 1..=SEGMENTS as u8 + 1 {
+            let (mut p, _, _) = m.boot(id);
+            p.write(&[id]);
+        }
+
+        let (_, mut c, _) = m.boot(SEGMENTS as u8 + 1);
+        let expected: Vec<_> = (2..=SEGMENTS as u8 + 1).map(|id| (id, vec![id])).collect();
+        assert_eq!(drain(&mut c), expected);
+    }
+
+    #[test]
+    fn firmwares_without_logs_keep_old_data() {
+        let mut m = Memory::new();
+        let (mut p, _, _) = m.boot(1);
+        p.write(&[1]);
+        for id in (2..=3).cycle().take(4 * SEGMENTS) {
+            m.boot(id);
+        }
+
+        let (mut p, mut c, recovered) = m.boot(4);
+        assert_eq!(recovered, Some(Identifier([3; 16])));
+        assert_eq!(drain(&mut c), [(1, vec![1])]);
+        p.write(&[4]);
+        assert_eq!(drain(&mut c), [(4, vec![4])]);
+    }
+
+    #[test]
+    fn partially_read_old_data_keeps_identifier() {
+        let mut m = Memory::new();
+        let (mut p, _, _) = m.boot(1);
+        p.write(&[1, 1, 1]);
+
+        let (mut p, mut c, _) = m.boot(2);
+        c.read().release(1);
+        p.write(&[2]);
+
+        let (_, mut c, _) = m.boot(2);
+        assert_eq!(drain(&mut c), [(1, vec![1, 1]), (2, vec![2])]);
+    }
+
+    #[test]
+    fn old_data_crossing_end() {
+        let mut m = Memory::new();
+        let (mut p, mut c, _) = m.boot(1);
+        p.write(&[9; 13]);
+        drain(&mut c);
+        p.write(&[1; 4]);
+
+        let (mut p, _, _) = m.boot(2);
+        p.write(&[2; 2]);
+
+        let (_, mut c, _) = m.boot(2);
+        assert_eq!(c.len(), 6);
+        assert_eq!(drain(&mut c), [(1, vec![1; 4]), (2, vec![2; 2])]);
+    }
+
+    #[test]
+    fn silent_firmware_keeps_slots() {
+        // A bootloader (9) and an application (1) where only one of them logs.
+        for (silent, logging) in [(9, 1), (1, 9)] {
+            let mut m = Memory::new();
+            for i in 0..SEGMENTS as u8 + 2 {
+                m.boot(silent);
+                let (mut p, _, _) = m.boot(logging);
+                p.write(&[i]);
+            }
+
+            let (_, mut c, _) = m.boot(silent);
+            let data = (0..SEGMENTS as u8 + 2).collect();
+            assert_eq!(drain(&mut c), [(logging, data)]);
+        }
+    }
+
+    #[test]
+    fn rebooting_firmware_keeps_older_data() {
+        let mut m = Memory::new();
+        let (mut p, _, _) = m.boot(1);
+        p.write(&[1]);
+        for _ in 0..SEGMENTS + 2 {
+            let (mut p, _, _) = m.boot(2);
+            p.write(&[2]);
+        }
+
+        let (_, mut c, _) = m.boot(2);
+        assert_eq!(drain(&mut c), [(1, vec![1]), (2, vec![2; SEGMENTS + 2])]);
+    }
+
+    #[test]
+    fn reset_after_old_data_was_read() {
+        let mut m = Memory::new();
+        let (mut p, _, _) = m.boot(1);
+        p.write(&[1]);
+        let (mut p, mut c, _) = m.boot(2);
+        drain(&mut c);
+        p.write(&[2]);
+
+        let (_, mut c, recovered) = m.boot(2);
+        assert_eq!(recovered, Some(Identifier([2; 16])));
+        assert_eq!(drain(&mut c), [(2, vec![2])]);
+    }
+
+    #[test]
+    fn write_wrapping_onto_stale_start() {
+        let mut m = Memory::new();
+        let (mut p, mut c, _) = m.boot(1);
+        p.write(&[9; 13]);
+        drain(&mut c);
+        // Ends with `write` at 0, the stale start of the only segment.
+        p.write(&[1; 3]);
+
+        let (_, mut c, _) = m.boot(2);
+        assert_eq!(drain(&mut c), [(1, vec![1; 3])]);
+    }
+
+    #[test]
+    fn segment_counters_wrap() {
+        let mut m = Memory::new();
+        let (mut p, _, _) = m.boot(1);
+        p.write(&[1]);
+        // Keeps slot 0 as the only segment.
+        let first = u32::MAX - SEGMENTS as u32 + 1;
+        m.set_u32(offset_of!(RingBuffer, first), first);
+        m.set_u32(offset_of!(RingBuffer, last), first + 1);
+
+        for id in 2..=SEGMENTS as u8 + 1 {
+            let (mut p, _, _) = m.boot(id);
+            p.write(&[id]);
+        }
+        let (_, mut c, _) = m.boot(SEGMENTS as u8 + 1);
+        let expected: Vec<_> = (2..=SEGMENTS as u8 + 1).map(|id| (id, vec![id])).collect();
+        assert_eq!(drain(&mut c), expected);
+    }
+
+    #[test]
+    fn identifiers_without_reading() {
+        let mut m = Memory::new();
+        assert_eq!(m.peek(), None);
+        let (mut p, _, _) = m.boot(1);
+        p.write(&[1]);
+        let (_, c, _) = m.boot(2);
+        assert_eq!(c.identifier(), &Identifier([2; 16]));
+        assert_eq!(m.peek(), Some(Identifier([2; 16])));
+
+        // `init` would reinitialize, so there is nothing to peek at.
+        m.set_u32(Memory::start_offset(1), 100);
+        assert_eq!(m.peek(), None);
+    }
+
+    #[test]
+    fn unordered_segment_starts_reinitialize() {
+        let mut m = Memory::new();
+        for id in 1..=3 {
+            let (mut p, _, _) = m.boot(id);
+            p.write(&[id]);
+        }
+        m.set_u32(Memory::start_offset(1), 2);
+        m.set_u32(Memory::start_offset(2), 1);
+
+        let (_, mut c, recovered) = m.boot(3);
+        assert_eq!(recovered, None);
+        assert_eq!(drain(&mut c), []);
+    }
+
+    #[test]
+    fn segment_start_outside_wrapped_buffer_reinitializes() {
+        let mut m = Memory::new();
+        let (mut p, mut c, _) = m.boot(1);
+        p.write(&[9; 13]);
+        drain(&mut c);
+        p.write(&[1; 4]);
+        let (mut p, _, _) = m.boot(2);
+        p.write(&[2; 2]);
+        // Within the readable data when counted from `read`, but past the buffer.
+        m.set_u32(Memory::start_offset(1), 17);
+
+        let (_, mut c, recovered) = m.boot(2);
+        assert_eq!(recovered, None);
+        assert_eq!(drain(&mut c), []);
+    }
+
+    #[test]
+    fn invalid_segments_reinitialize() {
+        let first = offset_of!(RingBuffer, first);
+        let last = offset_of!(RingBuffer, last);
+        let start = Memory::start_offset(1);
+        // No segments, too many segments, a start outside the readable data
+        // and a start outside the buffer.
+        for (offset, value) in [
+            (last, 0),
+            (last, SEGMENTS as u32 + 1),
+            (start, 7),
+            (start, 100),
+        ] {
+            let mut m = Memory::new();
+            let (mut p, _, _) = m.boot(1);
+            p.write(&[1, 1]);
+            let (mut p, _, _) = m.boot(2);
+            p.write(&[2]);
+
+            m.set_u32(first, 0);
+            m.set_u32(last, 2);
+            m.set_u32(offset, value);
+            let (_, mut c, recovered) = m.boot(2);
+            assert_eq!(recovered, None);
+            assert_eq!(drain(&mut c), []);
+        }
     }
 
     #[test]
@@ -845,7 +1248,7 @@ mod test {
         let (_, mut c, recovered) = m.boot(2);
         assert_eq!(recovered, Some(Identifier([1; 16])));
         assert_eq!(c.len(), 2);
-        assert_eq!(drain(&mut c), [vec![1, 2]]);
+        assert_eq!(drain(&mut c), [(1, vec![1, 2])]);
         assert_eq!(m.peek(), Some(Identifier([2; 16])));
     }
 
@@ -859,7 +1262,7 @@ mod test {
 
         let (_, mut c, _) = m.boot(1);
         assert_eq!(c.len(), 4);
-        assert_eq!(drain(&mut c), [vec![1; 4]]);
+        assert_eq!(drain(&mut c), [(1, vec![1; 4])]);
     }
 
     #[test]
@@ -875,9 +1278,9 @@ mod test {
             m.set_u32(write, write_value);
             let (mut p, mut c, recovered) = m.boot(1);
             assert_eq!(recovered, Some(Identifier([1; 16])));
-            assert_eq!(drain(&mut c), Vec::<Vec<u8>>::new());
+            assert_eq!(drain(&mut c), []);
             p.write(&[2]);
-            assert_eq!(drain(&mut c), [vec![2]]);
+            assert_eq!(drain(&mut c), [(1, vec![2])]);
         }
     }
 
@@ -890,6 +1293,6 @@ mod test {
         m.set_u32(offset_of!(RingBuffer, header), 0);
         let (_, mut c, recovered) = m.boot(1);
         assert_eq!(recovered, None);
-        assert_eq!(drain(&mut c), Vec::<Vec<u8>>::new());
+        assert_eq!(drain(&mut c), []);
     }
 }
