@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Provide list of caching-sensitive memory
 - Iterate over caching-sensitive memory
 - `GrantR::identifier` to tell recovered logs from different firmwares apart
+- `Consumer::next_log` to read logs together with their identifier
 
 ### Fixed
 
