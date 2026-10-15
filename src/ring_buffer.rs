@@ -699,6 +699,27 @@ impl<'c> Consumer<'c> {
         })
         .await
     }
+
+    #[cfg(feature = "async-await")]
+    /// Waits for data and passes up to `max_len` bytes of it to `f`, together
+    /// with the identifier of the firmware that wrote it.
+    ///
+    /// The bytes are released when `f` resolves. If the future is dropped before
+    /// that, nothing is released and the same bytes are passed on the next call.
+    /// They may start or end in the middle of a defmt frame.
+    pub async fn next_log<T>(
+        &mut self,
+        max_len: core::num::NonZeroUsize,
+        f: impl AsyncFnOnce(&'c Identifier, &[u8]) -> T,
+    ) -> T {
+        self.wait_for_data().await;
+        let grant = self.read();
+        let (buf, _) = grant.bufs();
+        let len = buf.len().min(max_len.get());
+        let ret = f(grant.identifier(), &buf[..len]).await;
+        grant.release(len);
+        ret
+    }
 }
 
 /// A read grant providing access to buffered data.
@@ -927,6 +948,29 @@ mod test {
         let (_, mut c, _) = m.boot(2);
         assert_eq!(c.len(), 6);
         assert_eq!(drain(&mut c), [(1, vec![1; 4]), (2, vec![2; 2])]);
+    }
+
+    #[cfg(feature = "async-await")]
+    #[test]
+    fn next_log_splits_at_boundary() {
+        let mut m = Memory::new();
+        let (mut p, _, _) = m.boot(1);
+        p.write(&[1; 3]);
+        let (mut p, mut c, _) = m.boot(2);
+        p.write(&[2; 2]);
+
+        let max_len = core::num::NonZeroUsize::new(2).unwrap();
+        let mut logs = Vec::new();
+        while !c.is_empty() {
+            let next = c.next_log(max_len, async |id, data| (id.0[0], data.to_vec()));
+            let core::task::Poll::Ready(log) = core::pin::pin!(next).poll(
+                &mut core::task::Context::from_waker(core::task::Waker::noop()),
+            ) else {
+                panic!("data is available");
+            };
+            logs.push(log);
+        }
+        assert_eq!(logs, [(1, vec![1, 1]), (1, vec![1]), (2, vec![2, 2])]);
     }
 
     #[test]
