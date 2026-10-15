@@ -42,6 +42,52 @@ pub struct ConsumerAndMetadata<'a> {
     pub recovered_identifier: Option<Identifier>,
 }
 
+impl ConsumerAndMetadata<'_> {
+    /// Waits for log data to be available and calls the provided `f`.
+    ///
+    /// `f` may itself deliver the log, or simply copy the data out.
+    /// Logs are removed from the persist buffer after `f` resolves.
+    ///
+    /// This function modifies `recovered_logs_len` to track how much
+    /// data remains with the recovered identifier. Do not use it
+    /// together with direct access to the `Consumer`.
+    pub async fn next_log<T>(
+        &mut self,
+        log_max_size: usize,
+        f: impl AsyncFnOnce(Identifier, &[u8]) -> T,
+    ) -> T {
+        let current_id = self.consumer.identifier().clone();
+        loop {
+            self.consumer.wait_for_data().await;
+            let grant = self.consumer.read();
+            let (buf1, buf2) = grant.bufs();
+
+            match (self.recovered_identifier.as_ref(), self.recovered_logs_len) {
+                (_, 0) => {
+                    let bytes_read = buf1.len().min(log_max_size);
+                    let ret = f(current_id, &buf1[..bytes_read]).await;
+                    grant.release(bytes_read);
+                    return ret;
+                }
+                (Some(old_id), remaining_old) => {
+                    let bytes_read = buf1.len().min(log_max_size).min(remaining_old);
+                    let ret = f(old_id.clone(), &buf1[..bytes_read]).await;
+                    self.recovered_logs_len -= bytes_read;
+                    grant.release(bytes_read);
+                    return ret;
+                }
+                (None, remaining_old) => {
+                    // This combination should be impossible (valid
+                    // header with remaining data but no old id), but if
+                    // it does happen, skip all the old logs.
+                    let bytes_read = (buf1.len() + buf2.len()).min(remaining_old);
+                    grant.release(bytes_read);
+                }
+            }
+        }
+    }
+}
+
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Initialize the logger.
