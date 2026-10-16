@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - Added support for a persistent firmware identifier to help hosts identify the running binary and select the correct ELF for decoding.
 - Provide list of caching-sensitive memory
+- Iterate over caching-sensitive memory
 
 ### Fixed
 
