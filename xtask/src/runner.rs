@@ -24,7 +24,7 @@ pub enum RunMode {
     /// Single QEMU run.
     #[default]
     Single,
-    /// Two-phase run with memory snapshot between phases.
+    /// Runs with a memory snapshot carried between them.
     Persist,
 }
 
@@ -137,59 +137,72 @@ fn run_single(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Result<bo
     compare_expected(example, &semihosting, opts)
 }
 
-/// Run a two-phase persist test.
+/// Upper bound on runs in a persist test, in case the firmware never stops dumping.
+const MAX_PERSIST_RUNS: usize = 5;
+
+/// Run a multi-phase persist test.
+///
+/// Each run that dumps the persist region is followed by a run with that dump loaded.
 fn run_persist(example: &str, elf_path: &PathBuf, opts: &RunOptions) -> Result<bool> {
-    // Phase 1: Run and capture persist region.
-    println!("Phase 1: Running...");
-    let phase1 = run_qemu(elf_path, None)?;
-    let phase1_uart0 = defmt::decode_output(elf_path, &phase1.uart0)?;
-
-    if opts.verbose {
-        let phase1_semihosting = defmt::decode_output(elf_path, &phase1.semihosting)?;
-        println!("--- semihosting ---");
-        print!("{phase1_semihosting}");
-        println!("--- uart ---");
-        print!("{phase1_uart0}");
-        println!("--- Phase 1 end ---");
-    }
-
-    if phase1.uart1.is_empty() {
-        println!("  {FAIL}: no persist region captured in phase 1");
-        return Ok(false);
-    }
-
-    if opts.verbose {
-        println!(
-            "Captured {} bytes from persist region\n",
-            phase1.uart1.len()
-        );
-    }
-
-    // Phase 2: Load snapshot and run again.
     let snapshot_file = NamedTempFile::new().context("Failed to create snapshot file")?;
-    fs::write(snapshot_file.path(), &phase1.uart1)?;
+    let snapshot_path = snapshot_file.path().to_path_buf();
+    let mut outputs = Vec::new();
 
-    println!("Phase 2: Running with snapshot...");
-    let phase2 = run_qemu(
-        elf_path,
-        Some(MemoryLoad {
-            file: &snapshot_file.path().to_path_buf(),
-            addr: PERSIST_ADDR,
-        }),
-    )?;
-    let phase2_uart0 = defmt::decode_output(elf_path, &phase2.uart0)?;
+    for phase in 1..=MAX_PERSIST_RUNS {
+        let output = if phase == 1 {
+            println!("Phase 1: Running...");
+            run_qemu(elf_path, None)?
+        } else {
+            println!("Phase {phase}: Running with snapshot...");
+            run_qemu(
+                elf_path,
+                Some(MemoryLoad {
+                    file: &snapshot_path,
+                    addr: PERSIST_ADDR,
+                }),
+            )?
+        };
+        let uart0 = defmt::decode_output(elf_path, &output.uart0)?;
 
-    if opts.verbose {
-        let phase2_semihosting = defmt::decode_output(elf_path, &phase2.semihosting)?;
-        println!("--- semihosting ---");
-        print!("{phase2_semihosting}");
-        println!("--- uart ---");
-        print!("{phase2_uart0}");
-        println!("--- Phase 2 end ---\n");
+        if opts.verbose {
+            let semihosting = defmt::decode_output(elf_path, &output.semihosting)?;
+            println!("--- semihosting ---");
+            print!("{semihosting}");
+            println!("--- uart ---");
+            print!("{uart0}");
+            println!("--- Phase {phase} end ---\n");
+        }
+        outputs.push(uart0);
+
+        if output.uart1.is_empty() {
+            if phase == 1 {
+                println!("  {FAIL}: no persist region captured in phase 1");
+                return Ok(false);
+            }
+            let combined = outputs
+                .iter()
+                .enumerate()
+                .map(|(i, output)| format!("=== Run {} ===\n{output}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return compare_expected(example, &combined, opts);
+        }
+
+        if opts.verbose {
+            println!(
+                "Captured {} bytes from persist region\n",
+                output.uart1.len()
+            );
+        }
+        fs::write(&snapshot_path, &output.uart1)?;
     }
 
-    let combined = format!("=== Run 1 ===\n{phase1_uart0}\n=== Run 2 ===\n{phase2_uart0}");
-    compare_expected(example, &combined, opts)
+    println!("  {FAIL}: persist region still dumped after {MAX_PERSIST_RUNS} runs");
+    for (i, output) in outputs.iter().enumerate() {
+        println!("--- Run {} ---", i + 1);
+        print!("{output}");
+    }
+    Ok(false)
 }
 
 /// Compare output against expected file.
