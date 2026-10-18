@@ -46,9 +46,8 @@ __defmt_persist_end   = ORIGIN(DEFMT_PERSIST) + LENGTH(DEFMT_PERSIST);
 Then call `init` early in your program:
 
 ```rust,ignore
-// For example a hash of the firmware image.
-let id = defmt_persist::Identifier(firmware_hash());
-let Ok(mut consumer) = defmt_persist::init(id) else {
+// The GNU build ID of the firmware, see "Firmware identifier" below.
+let Ok(mut consumer) = defmt_persist::init(build_id()) else {
     panic!("init failed");
 };
 ```
@@ -69,6 +68,60 @@ while !consumer.is_empty() {
     grant.release(len);
 }
 # }
+```
+
+## Firmware identifier
+
+The identifier tells the host which ELF to decode the recovered logs with. The GNU build ID is a
+good fit: the linker hashes the whole output ELF into it, including the `.defmt` string table
+that decoding needs. So it changes whenever the logs need a different ELF to decode, also when
+only a log string changed and the flash content stayed the same. It costs nothing at boot, and
+the host reads the same ID from each ELF (`readelf -n`, or `build_id()` in the `object` crate).
+
+Link with `--build-id=md5`, which gives exactly 16 bytes, e.g. in `build.rs`:
+
+```rust,ignore
+println!("cargo:rustc-link-arg=--build-id=md5");
+```
+
+Keep the note in the image and mark it in the linker script. Some runtimes discard all notes, a
+section of its own comes first and keeps it:
+
+```text
+SECTIONS
+{
+  .note.gnu.build-id : ALIGN(4)
+  {
+    __build_id = .;
+    KEEP(*(.note.gnu.build-id))
+  } > FLASH
+}
+INSERT AFTER .rodata;
+```
+
+Then read it at boot:
+
+```rust,ignore
+/// An ELF note holding an MD5 GNU build ID.
+#[repr(C)]
+struct BuildIdNote {
+    name_size: u32,
+    desc_size: u32,
+    kind: u32,
+    name: [u8; 4],
+    id: [u8; 16],
+}
+
+fn build_id() -> defmt_persist::Identifier {
+    unsafe extern "C" {
+        static __build_id: BuildIdNote;
+    }
+    // SAFETY: The linker script places the build ID note at `__build_id`.
+    let note = unsafe { &*(&raw const __build_id) };
+    // NT_GNU_BUILD_ID
+    assert!(note.kind == 3 && note.name == *b"GNU\0" && note.desc_size == 16);
+    defmt_persist::Identifier(note.id)
+}
 ```
 
 ## Panic Handler
