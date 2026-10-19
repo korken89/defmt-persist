@@ -58,6 +58,31 @@ pub struct RingBuffer {
 #[derive(Clone, defmt::Format, Debug, PartialEq, Eq, Default)]
 pub struct Identifier(pub [u8; 16]);
 
+impl Identifier {
+    fn read_volatile(&mut self) -> Self {
+        let identifier = ptr::from_mut(self);
+        // SAFETY: A regular read from self would be safe here, but could be
+        // optimized away.
+        unsafe { identifier.read_volatile() }
+    }
+
+    fn write_volatile(&mut self, value: Self) {
+        let identifier = ptr::from_mut(self);
+        // SAFETY: A regular assignment to self would be safe here, but is not
+        // guaranteed to actually update memory.
+        unsafe { identifier.write_volatile(value) };
+    }
+}
+
+/// Bytes from `from` to `to`, going forward in a ring of `len` bytes.
+fn ring_distance(from: usize, to: usize, len: usize) -> usize {
+    if to >= from {
+        to - from
+    } else {
+        len - from + to
+    }
+}
+
 /// Writes data into the buffer.
 pub struct Producer<'a> {
     header: &'a RingBuffer,
@@ -175,42 +200,22 @@ impl RingBuffer {
             v.read.store(0, Ordering::Relaxed);
             // The intermediate state doesn't matter until header == MAGIC
             v.write.store(0, Ordering::Relaxed);
-            v.write_identifier(new_identifier);
+            v.identifier.write_volatile(new_identifier);
 
             // The identifier must be in memory before the header claims it
             // is valid, otherwise a reset in between recovers garbage.
             v.set_header(MAGIC);
             None
         } else {
-            // The header promised to keep the contract, but we don't
-            // trust it for the safety of our pointer offsets.
-            let write = v.write.load(Ordering::Relaxed) as usize;
-            let read = v.read.load(Ordering::Relaxed) as usize;
-            let read_ok = read < buf_len;
-            let write_ok = write < buf_len;
-            // Since `header` is already marked as valid, some extra care
-            // is taken here to avoid situations where there is a gap of time
-            // where both indexes are in-bounds, but not valid. Otherwise
-            // a poorly timed reset could leave the queue in a state that
-            // appears valid and non-empty.
-            match (read_ok, write_ok) {
-                (true, true) => {}
-                (true, false) => v.write.store(read as u32, Ordering::Relaxed),
-                (false, true) => v.read.store(write as u32, Ordering::Relaxed),
-                (false, false) => {
-                    v.read.store(0, Ordering::Relaxed);
-                    // write is still invalid between these operations
-                    v.write.store(0, Ordering::Relaxed);
-                }
-            };
+            v.repair(buf_len);
 
-            let old_identifier = v.read_identifier();
+            let old_identifier = v.identifier.read_volatile();
             if old_identifier != new_identifier {
                 // Temporarily invalidate the header during the
                 // non-atomic write to identifier, otherwise a reset in
                 // between recovers garbage.
                 v.set_header(0);
-                v.write_identifier(new_identifier);
+                v.identifier.write_volatile(new_identifier);
                 v.set_header(MAGIC);
             }
             Some(old_identifier)
@@ -269,28 +274,49 @@ impl RingBuffer {
 
     /// Writes `value` to the header, ordered after all previous writes.
     fn set_header(&mut self, value: u128) {
-        self.flush_ecc();
-        fence(Ordering::SeqCst);
+        self.flush();
         let header = ptr::from_mut(&mut self.header);
         // SAFETY: A regular assignment to self.header would be safe here, but
         // is not guaranteed to actually update memory.
         unsafe { header.write_volatile(value) };
+        self.flush();
+    }
+
+    /// Brings the indexes of a recovered buffer into a valid state.
+    fn repair(&mut self, buf_len: usize) {
+        let (read, write) = self.repaired_indexes(buf_len);
+        // Since `header` can be marked as valid, some extra care
+        // is taken here to avoid situations where there is a gap of time
+        // where both indexes are in-bounds, but not valid. Otherwise
+        // a poorly timed reset could leave the queue in a state that
+        // appears valid and non-empty. Storing `read` first ensures this,
+        // as a still invalid `write` is then repaired to `read` again.
+        if self.read.load(Ordering::Relaxed) as usize != read {
+            self.read.store(read as u32, Ordering::Relaxed);
+        }
+        if self.write.load(Ordering::Relaxed) as usize != write {
+            self.write.store(write as u32, Ordering::Relaxed);
+        }
+    }
+
+    /// The `read` and `write` indexes that [`Self::repair`] brings the buffer to.
+    fn repaired_indexes(&self, buf_len: usize) -> (usize, usize) {
+        // Even if the header promises to keep the contract, we don't
+        // trust it for the safety of our pointer offsets.
+        let read = self.read.load(Ordering::Relaxed) as usize;
+        let write = self.write.load(Ordering::Relaxed) as usize;
+        match (read < buf_len, write < buf_len) {
+            (true, true) => (read, write),
+            (true, false) => (read, read),
+            (false, true) => (write, write),
+            (false, false) => (0, 0),
+        }
+    }
+
+    /// Orders all previous writes before the following ones, also across a reset.
+    fn flush(&self) {
         self.flush_ecc();
         fence(Ordering::SeqCst);
-    }
-
-    fn read_identifier(&mut self) -> Identifier {
-        let identifier = ptr::from_mut(&mut self.identifier);
-        // SAFETY: A regular read from self.identifier would be safe here, but
-        // could be optimized away.
-        unsafe { identifier.read_volatile() }
-    }
-
-    fn write_identifier(&mut self, value: Identifier) {
-        let identifier = ptr::from_mut(&mut self.identifier);
-        // SAFETY: A regular assignment to self.identifier would be safe here,
-        // but is not guaranteed to actually update memory.
-        unsafe { identifier.write_volatile(value) };
     }
 
     /// # Safety
@@ -303,7 +329,7 @@ impl RingBuffer {
     pub(crate) unsafe fn peek_identifier(memory: Range<usize>) -> Option<Identifier> {
         // SAFETY: The safety contract is reexported.
         let v = unsafe { Self::from_memory(&memory) };
-        v.header_valid().then(|| v.read_identifier())
+        v.header_valid().then(|| v.identifier.read_volatile())
     }
 
     /// Splits the queue into producer and consumer given a memory area.
@@ -422,6 +448,13 @@ impl Consumer<'_> {
     /// [`ConsumerAndMetadata::recovered_identifier`](crate::ConsumerAndMetadata::recovered_identifier).
     pub fn identifier(&self) -> &Identifier {
         &self.header.identifier
+    }
+
+    /// Number of bytes available to read, including data from an older firmware.
+    pub(crate) fn len(&self) -> usize {
+        let write = self.header.write.load(Ordering::Acquire) as usize;
+        let read = self.header.read.load(Ordering::Relaxed) as usize;
+        ring_distance(read, write, self.buf.len())
     }
 
     /// Returns `true` if there is no data available to read.
@@ -593,6 +626,58 @@ mod test {
 
     use super::*;
 
+    extern crate std;
+    use core::mem::offset_of;
+    use std::{vec, vec::Vec};
+
+    /// Persist memory with a 16 byte buffer, reused across simulated resets.
+    #[repr(C, align(16))]
+    struct Memory([u8; size_of::<RingBuffer>() + 16]);
+
+    impl Memory {
+        fn new() -> Self {
+            Memory([0; size_of::<RingBuffer>() + 16])
+        }
+
+        fn range(&mut self) -> Range<usize> {
+            let start = ptr::from_mut(self).expose_provenance();
+            start..start + size_of::<Self>()
+        }
+
+        /// Initializes the buffer as the firmware identified by `id` would.
+        fn boot(&mut self, id: u8) -> (Producer<'_>, Consumer<'_>, Option<Identifier>) {
+            let range = self.range();
+            // SAFETY: The memory is aligned and large enough, and borrowed for
+            // as long as the producer and consumer live.
+            unsafe { RingBuffer::recover_or_reinitialize(range, Identifier([id; 16])) }
+        }
+
+        fn peek(&mut self) -> Option<Identifier> {
+            let range = self.range();
+            // SAFETY: The memory is aligned, large enough and borrowed.
+            unsafe { RingBuffer::peek_identifier(range) }
+        }
+
+        fn set_u32(&mut self, offset: usize, value: u32) {
+            self.0[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+        }
+    }
+
+    /// Reads everything, returning the data of each grant.
+    fn drain(c: &mut Consumer<'_>) -> Vec<Vec<u8>> {
+        let mut grants = Vec::new();
+        while !c.is_empty() {
+            let r = c.read();
+            let (buf1, buf2) = r.bufs();
+            let data = [buf1, buf2].concat();
+            // Guards against looping forever on empty grants.
+            assert!(!data.is_empty());
+            grants.push(data);
+            r.release_all();
+        }
+        grants
+    }
+
     #[test]
     fn touching_no_boundaries() {
         let mut b = RingBuffer::new(1, 1);
@@ -747,5 +832,64 @@ mod test {
         r.release(1);
         let r = c.read();
         assert_eq!(r.bufs(), (&[2][..], &[][..]));
+    }
+
+    #[test]
+    fn recovers_data_after_reset() {
+        let mut m = Memory::new();
+        assert_eq!(m.peek(), None);
+        let (mut p, _, recovered) = m.boot(1);
+        assert_eq!(recovered, None);
+        p.write(&[1, 2]);
+
+        let (_, mut c, recovered) = m.boot(2);
+        assert_eq!(recovered, Some(Identifier([1; 16])));
+        assert_eq!(c.len(), 2);
+        assert_eq!(drain(&mut c), [vec![1, 2]]);
+        assert_eq!(m.peek(), Some(Identifier([2; 16])));
+    }
+
+    #[test]
+    fn recovers_data_crossing_end() {
+        let mut m = Memory::new();
+        let (mut p, mut c, _) = m.boot(1);
+        p.write(&[9; 13]);
+        drain(&mut c);
+        p.write(&[1; 4]);
+
+        let (_, mut c, _) = m.boot(1);
+        assert_eq!(c.len(), 4);
+        assert_eq!(drain(&mut c), [vec![1; 4]]);
+    }
+
+    #[test]
+    fn invalid_indexes_are_repaired() {
+        let read = offset_of!(RingBuffer, read);
+        let write = offset_of!(RingBuffer, write);
+        for (read_value, write_value) in [(100, 2), (0, 100), (100, 100)] {
+            let mut m = Memory::new();
+            let (mut p, _, _) = m.boot(1);
+            p.write(&[1, 1]);
+
+            m.set_u32(read, read_value);
+            m.set_u32(write, write_value);
+            let (mut p, mut c, recovered) = m.boot(1);
+            assert_eq!(recovered, Some(Identifier([1; 16])));
+            assert_eq!(drain(&mut c), Vec::<Vec<u8>>::new());
+            p.write(&[2]);
+            assert_eq!(drain(&mut c), [vec![2]]);
+        }
+    }
+
+    #[test]
+    fn invalid_header_reinitializes() {
+        let mut m = Memory::new();
+        let (mut p, _, _) = m.boot(1);
+        p.write(&[1, 1]);
+
+        m.set_u32(offset_of!(RingBuffer, header), 0);
+        let (_, mut c, recovered) = m.boot(1);
+        assert_eq!(recovered, None);
+        assert_eq!(drain(&mut c), Vec::<Vec<u8>>::new());
     }
 }

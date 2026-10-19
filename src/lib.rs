@@ -88,14 +88,10 @@ pub fn init(new_identifier: Identifier) -> Result<ConsumerAndMetadata<'static>, 
     // - Linker symbols provide the memory region.
     // - The atomic swap above guarantees this code runs exactly once, ensuring exclusive ownership.
     // - Alignment and size are validated by get_persist_memory_from_symbols.
-    let (p, mut c, old_identifier) =
+    let (p, c, old_identifier) =
         unsafe { RingBuffer::recover_or_reinitialize(memory, new_identifier) };
 
-    let recovered_logs_len = {
-        let grant = c.read();
-        let (buf1, buf2) = grant.bufs();
-        buf1.len() + buf2.len()
-    };
+    let recovered_logs_len = c.len();
 
     // SAFETY: The atomic swap guarantees this is called only once.
     unsafe { logger::LOGGER_STATE.initialize(p) };
