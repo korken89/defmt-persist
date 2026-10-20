@@ -99,6 +99,26 @@ jobs:
       - run: cargo test --lib --release loom
       - run: cargo test --lib --release --no-default-features loom
 
+  kani:
+    name: Kani (-j ${{ matrix.jobs }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        jobs: [2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Track memory
+        run: nohup sh -c 'while sleep 5; do free -m | awk "/^Mem/ { print \$3 }"; done' > memory.log 2>&1 &
+      # Same version as the flake.
+      - uses: model-checking/kani-github-action@v1.1
+        with:
+          kani-version: "0.66.0"
+          args: --output-format=terse -j ${{ matrix.jobs }}
+      - name: Peak memory
+        if: always()
+        run: echo "Peak $(sort -n memory.log | tail -1) MB of $(free -m | awk '/^Mem/ { print $2 }') MB"
+
   miri:
     name: Miri (${{ matrix.features || 'no-default-features' }})
     runs-on: ubuntu-latest

@@ -239,6 +239,9 @@ impl RingBuffer {
     /// No-op when `ecc` feature is disabled.
     #[inline]
     fn flush_ecc(&self) {
+        // Where a reset may happen, for the proofs to check.
+        #[cfg(kani)]
+        proofs::reset_point(self);
         #[cfg(feature = "ecc")]
         {
             // Ensure previous writes are emitted before the flush.
@@ -277,26 +280,7 @@ impl RingBuffer {
 
         // SAFETY: This function's safety contract is a superset of the callee's.
         let v = unsafe { Self::from_memory(&memory) };
-        if v.header_valid() && v.repair(buf_len) {
-            v.drop_empty_segments();
-            if v.segments.newest().identifier.read_volatile() != new_identifier {
-                v.push_segment(new_identifier);
-            }
-        } else {
-            v.set_header(0);
-            v.read.store(0, Ordering::Relaxed);
-            v.write.store(0, Ordering::Relaxed);
-            v.segments.first.store(0, Ordering::Relaxed);
-            v.segments.last.store(1, Ordering::Relaxed);
-            v.segments.table[0]
-                .identifier
-                .write_volatile(new_identifier);
-
-            // Everything must be in memory before the header claims it is
-            // valid, otherwise a reset in between recovers garbage.
-            v.set_header(MAGIC);
-        }
-        v.flush();
+        v.recover(buf_len, new_identifier);
 
         // SAFETY:
         // - The caller guarantees at least 1 byte of space left in the allocated area.
@@ -312,6 +296,31 @@ impl RingBuffer {
 
         // SAFETY: The caller guarantees buf.len() < i32::MAX / 4.
         unsafe { v.split(buf) }
+    }
+
+    /// Keeps what can be trusted of a buffer of `buf_len` bytes from a previous run, and
+    /// continues it with data from the firmware `new_identifier`.
+    fn recover(&mut self, buf_len: usize, new_identifier: Identifier) {
+        if self.header_valid() && self.repair(buf_len) {
+            self.drop_empty_segments();
+            if self.segments.newest().identifier.read_volatile() != new_identifier {
+                self.push_segment(new_identifier);
+            }
+        } else {
+            self.set_header(0);
+            self.read.store(0, Ordering::Relaxed);
+            self.write.store(0, Ordering::Relaxed);
+            self.segments.first.store(0, Ordering::Relaxed);
+            self.segments.last.store(1, Ordering::Relaxed);
+            self.segments.table[0]
+                .identifier
+                .write_volatile(new_identifier);
+
+            // Everything must be in memory before the header claims it is
+            // valid, otherwise a reset in between recovers garbage.
+            self.set_header(MAGIC);
+        }
+        self.flush();
     }
 
     /// Reinterprets `memory` as a `RingBuffer` without checking the header.
@@ -371,7 +380,16 @@ impl RingBuffer {
         if self.write.load(Ordering::Relaxed) as usize != write {
             self.write.store(write as u32, Ordering::Relaxed);
         }
-        self.segments_valid(read, write, buf_len)
+        self.valid(buf_len)
+    }
+
+    /// Returns `true` if the indexes and segments uphold what the RingBuffer guarantees,
+    /// for a buffer of `buf_len` bytes.
+    fn valid(&self, buf_len: usize) -> bool {
+        let read = self.read.load(Ordering::Relaxed) as usize;
+        let write = self.write.load(Ordering::Relaxed) as usize;
+        let ring = Ring(buf_len);
+        ring.contains(read) && ring.contains(write) && self.segments_valid(read, write, buf_len)
     }
 
     /// The `read` and `write` indexes that [`Self::repair`] brings the buffer to.
@@ -1552,5 +1570,327 @@ mod loom_test {
             }
         });
         assert!(wrapped.load(Ordering::Relaxed));
+    }
+}
+
+/// Proofs of what the ring buffer guarantees, run with `cargo kani`.
+///
+/// WORKAROUND: Kani 0.66 misreads a whole [`Identifier`] at a symbolic index of the segment
+/// table, both when comparing and when copying it, see [`kani_misreads_identifiers`]. The
+/// proofs therefore only read single bytes of the identifiers in the table, with a symbolic
+/// byte index to cover all of them, or compare slots instead of identifiers.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// The largest buffer `RingBuffer::split` allows.
+    const MAX_LEN: usize = i32::MAX as usize / 4;
+
+    /// The buffer length in the proofs that need its contents.
+    const BUF_LEN: usize = 5;
+
+    /// Any identifier. Only whether two are equal matters, so one byte is enough.
+    fn any_identifier() -> Identifier {
+        Identifier([kani::any(); 16])
+    }
+
+    /// A buffer with any header, indexes and segments.
+    fn any_ring_buffer() -> RingBuffer {
+        RingBuffer {
+            header: kani::any(),
+            segments: Segments {
+                table: core::array::from_fn(|_| Segment {
+                    identifier: any_identifier(),
+                    start: AtomicU32::new(kani::any()),
+                }),
+                first: AtomicU8::new(kani::any()),
+                last: AtomicU8::new(kani::any()),
+            },
+            read: AtomicU32::new(kani::any()),
+            write: AtomicU32::new(kani::any()),
+            #[cfg(feature = "ecc")]
+            _ecc_flush: EccFlush(AtomicU8::new(0)),
+        }
+    }
+
+    /// Buffer contents with any bytes.
+    fn any_buf() -> [UnsafeCell<MaybeUninit<u8>>; BUF_LEN] {
+        core::array::from_fn(|_| UnsafeCell::new(MaybeUninit::new(kani::any())))
+    }
+
+    fn byte(buf: &[UnsafeCell<MaybeUninit<u8>>], index: usize) -> u8 {
+        // SAFETY: `any_buf` initializes all bytes, and no reference to them is alive.
+        unsafe { (*buf[index].get()).assume_init() }
+    }
+
+    fn load(index: &AtomicU32) -> usize {
+        index.load(Ordering::Relaxed) as usize
+    }
+
+    /// Proves that `a == b`, when asserted, without the comparison that Kani gets wrong.
+    ///
+    /// Any byte may be picked, so asserting it proves all bytes are equal. Only use it in
+    /// assertions, as it says nothing about the other bytes when it is `false`.
+    fn same_identifier(a: &Identifier, b: &Identifier) -> bool {
+        let byte = kani::any_where(|&byte: &usize| byte < a.0.len());
+        a.0[byte] == b.0[byte]
+    }
+
+    /// Kani 0.66 fails this, although it holds. Once Kani passes it, the workaround described
+    /// on this module can go.
+    #[kani::proof]
+    #[kani::unwind(17)]
+    #[kani::should_panic]
+    fn kani_misreads_identifiers() {
+        let rb = any_ring_buffer();
+        let slot = kani::any_where(|&slot: &usize| slot < rb.segments.table.len());
+        let copy = rb.segments.table[slot].identifier.clone();
+        assert!(rb.segments.table[slot].identifier == copy);
+    }
+
+    /// The slot of the segment that the data at `index` belongs to, in a valid buffer.
+    fn owner(rb: &RingBuffer, index: usize, buf_len: usize) -> usize {
+        let ring = Ring(buf_len);
+        let read = load(&rb.read);
+        let segments = &rb.segments;
+        let mut owner = segments.first();
+        for n in 1..segments.count() {
+            let slot = Segments::RING.add(segments.first(), n);
+            if ring.used(read, segments.table[slot].start()) <= ring.used(read, index) {
+                owner = slot;
+            }
+        }
+        owner
+    }
+
+    /// A valid buffer before recovery, to check the buffer against during and after it.
+    #[derive(Clone, Copy)]
+    struct Before {
+        buf_len: usize,
+        read: usize,
+        write: usize,
+        /// Any byte of data, and the slot and any byte of the identifier it belongs to.
+        data: usize,
+        slot: usize,
+        byte: usize,
+        identifier_byte: u8,
+    }
+
+    impl Before {
+        /// A valid buffer `rb`, with any byte of data in it.
+        fn of(rb: &RingBuffer, buf_len: usize) -> Self {
+            let data = kani::any_where(|&data| Ring(buf_len).contains(data));
+            let slot = owner(rb, data, buf_len);
+            let byte = kani::any_where(|&byte: &usize| byte < 16);
+            Before {
+                buf_len,
+                read: load(&rb.read),
+                write: load(&rb.write),
+                data,
+                slot,
+                byte,
+                identifier_byte: rb.segments.table[slot].identifier.0[byte],
+            }
+        }
+
+        /// Asserts that `rb` is valid, keeps `write`, has only dropped data from the oldest
+        /// end, and labels the data it kept the same.
+        fn check(&self, rb: &RingBuffer) {
+            let ring = Ring(self.buf_len);
+            assert!(rb.header == MAGIC && rb.valid(self.buf_len));
+            let read = load(&rb.read);
+            assert_eq!(load(&rb.write), self.write);
+            assert!(ring.used(self.read, read) <= ring.used(self.read, self.write));
+            if ring.used(read, self.data) < ring.used(read, self.write) {
+                assert_eq!(owner(rb, self.data, self.buf_len), self.slot);
+                let identifier = &rb.segments.table[self.slot].identifier;
+                assert_eq!(identifier.0[self.byte], self.identifier_byte);
+            }
+        }
+    }
+
+    /// The buffer that [`resets_keep_labels`] recovers.
+    static mut RECOVERING: Option<Before> = None;
+
+    /// The buffer as a reset during [`resets_keep_labels`] would leave it.
+    static mut RESET: Option<RingBuffer> = None;
+
+    /// Where a reset may happen during [`resets_keep_labels`], which is at every flush.
+    ///
+    /// A reset between two flushes leaves the same state as at the flush before, since each
+    /// step only makes one store visible. Any one of them may be picked, and the buffer is
+    /// copied there to check it once afterwards, as checking at every flush is slow.
+    pub(super) fn reset_point(rb: &RingBuffer) {
+        // SAFETY: The proofs run on one thread.
+        let Some(before) = (unsafe { (&raw const RECOVERING).read() }) else {
+            return;
+        };
+        if kani::any() {
+            let copy = RingBuffer {
+                header: rb.header,
+                segments: Segments {
+                    table: core::array::from_fn(|slot| Segment {
+                        identifier: Identifier([0; 16]),
+                        start: AtomicU32::new(rb.segments.table[slot].start() as u32),
+                    }),
+                    first: AtomicU8::new(rb.segments.first() as u8),
+                    last: AtomicU8::new(rb.segments.last() as u8),
+                },
+                read: AtomicU32::new(load(&rb.read) as u32),
+                write: AtomicU32::new(load(&rb.write) as u32),
+                #[cfg(feature = "ecc")]
+                _ecc_flush: EccFlush(AtomicU8::new(0)),
+            };
+            let mut copy = copy;
+            // Only this byte of the identifiers is checked.
+            copy.segments.table[before.slot].identifier.0[before.byte] =
+                rb.segments.table[before.slot].identifier.0[before.byte];
+            // SAFETY: As above.
+            unsafe { (&raw mut RESET).write(Some(copy)) };
+        }
+    }
+
+    /// Recovery from any memory gives a valid buffer for the new firmware. From a valid
+    /// buffer it keeps `write`, only drops data from the oldest end, and never changes
+    /// which firmware the kept data is labeled with.
+    #[kani::proof]
+    #[kani::unwind(17)]
+    fn recovery_keeps_labels() {
+        let mut rb = any_ring_buffer();
+        // The proofs of `Ring` cover all lengths, the logic only needs to wrap.
+        let buf_len = kani::any_where(|&len| 0 < len && len <= BUF_LEN);
+        let identifier = any_identifier();
+        let before = (rb.header_valid() && rb.valid(buf_len)).then(|| Before::of(&rb, buf_len));
+
+        rb.recover(buf_len, identifier.clone());
+
+        assert!(rb.header_valid() && rb.valid(buf_len));
+        assert!(same_identifier(
+            &rb.segments.newest().identifier,
+            &identifier
+        ));
+        if let Some(before) = before {
+            before.check(&rb);
+        }
+    }
+
+    /// A reset at any point of recovering a valid buffer leaves a valid buffer with the same
+    /// data, except some of the oldest, labeled the same.
+    #[kani::proof]
+    #[kani::unwind(17)]
+    #[kani::solver(cadical)]
+    fn resets_keep_labels() {
+        let mut rb = any_ring_buffer();
+        let buf_len = kani::any_where(|&len| 0 < len && len <= BUF_LEN);
+        kani::assume(rb.header_valid() && rb.valid(buf_len));
+        let before = Before::of(&rb, buf_len);
+
+        // SAFETY: The proofs run on one thread.
+        unsafe { (&raw mut RECOVERING).write(Some(before)) };
+        rb.recover(buf_len, any_identifier());
+        // SAFETY: As above.
+        if let Some(reset) = unsafe { ptr::replace(&raw mut RESET, None) } {
+            before.check(&reset);
+        }
+    }
+
+    /// A grant holds data from `read` that is readable, all from the firmware it names,
+    /// and is only empty when there is no data. Releasing it keeps the buffer valid.
+    #[kani::proof]
+    #[kani::unwind(17)]
+    fn grants_hold_labeled_data() {
+        let mut rb = any_ring_buffer();
+        let buf = any_buf();
+        let buf_len = kani::any_where(|&len| 0 < len && len <= BUF_LEN);
+        let ring = Ring(buf_len);
+        kani::assume(rb.valid(buf_len));
+        let (read, write) = (load(&rb.read), load(&rb.write));
+        let data = kani::any_where(|&data| ring.contains(data));
+        let old_owner = ptr::from_ref(&rb.segments.table[owner(&rb, data, buf_len)].identifier);
+
+        // SAFETY: The buffer is shorter than `i32::MAX / 4`.
+        let (_, mut c) = unsafe { rb.split(&buf[..buf_len]) };
+        let grant = c.read();
+        let (slice1, slice2) = grant.bufs();
+        let len = slice1.len() + slice2.len();
+        let buf_start: *const u8 = buf.as_ptr().cast();
+        assert!(slice1.is_empty() || slice1.as_ptr() == buf_start.wrapping_add(read));
+        assert!(slice2.is_empty() || slice2.as_ptr() == buf_start);
+        assert!(len <= ring.used(read, write));
+        assert_eq!(len == 0, read == write);
+        if ring.used(read, data) < len {
+            assert!(ptr::eq(grant.identifier(), old_owner));
+        }
+
+        grant.release(kani::any());
+        assert!(c.header.valid(buf_len));
+    }
+
+    /// The producer only writes free space, appends what fits, and keeps the buffer valid.
+    #[kani::proof]
+    #[kani::unwind(17)]
+    fn writes_append_to_free_space() {
+        let mut rb = any_ring_buffer();
+        let buf = any_buf();
+        let buf_len = kani::any_where(|&len| 0 < len && len <= BUF_LEN);
+        let ring = Ring(buf_len);
+        kani::assume(rb.valid(buf_len));
+        let (read, write) = (load(&rb.read), load(&rb.write));
+        let data: [u8; BUF_LEN] = kani::any();
+        let len = kani::any_where(|&len| len <= BUF_LEN);
+        let old = kani::any_where(|&old| {
+            ring.contains(old) && ring.used(read, old) < ring.used(read, write)
+        });
+        let old_byte = byte(&buf, old);
+
+        // SAFETY: The buffer is shorter than `i32::MAX / 4`.
+        let (mut p, c) = unsafe { rb.split(&buf[..buf_len]) };
+        p.write(&data[..len]);
+
+        let written = len.min(ring.free(read, write));
+        assert_eq!(load(&c.header.write), ring.add(write, written));
+        assert!(c.header.valid(buf_len));
+        assert_eq!(byte(&buf, old), old_byte);
+        let new = kani::any_where(|&new| new < written);
+        assert_eq!(byte(&buf, ring.add(write, new)), data[new]);
+    }
+
+    /// A ring of any length, with an index in it.
+    fn any_ring() -> (Ring, usize) {
+        let len = kani::any_where(|&len| 0 < len && len <= MAX_LEN);
+        (Ring(len), kani::any_where(|&index| index < len))
+    }
+
+    #[kani::proof]
+    fn ring_used_and_free() {
+        let (ring, start) = any_ring();
+        let end = kani::any_where(|&end| ring.contains(end));
+        let used = ring.used(start, end);
+        assert!(used < ring.0);
+        assert_eq!(used + ring.free(start, end), ring.0 - 1);
+        assert_eq!(ring.add(start, used), end);
+    }
+
+    #[kani::proof]
+    fn ring_add_and_sub() {
+        let (ring, index) = any_ring();
+        let n = kani::any_where(|&n| n < ring.0);
+        assert!(ring.contains(ring.add(index, n)));
+        assert!(ring.contains(ring.sub(index, n)));
+        assert_eq!(ring.sub(ring.add(index, n), n), index);
+    }
+
+    #[kani::proof]
+    fn ring_ranges() {
+        let (ring, start) = any_ring();
+        let n = kani::any_where(|&n| n < ring.0);
+        let (first, second) = ring.ranges(start, n);
+        assert_eq!(first.start, start);
+        assert!(first.end <= ring.0 && second.end <= ring.0);
+        assert_eq!(first.len() + second.len(), n);
+        // The second range continues where the first one wraps.
+        assert!(second.is_empty() || (first.end == ring.0 && second.start == 0));
+        // They never overlap, also not when wrapping onto `start`.
+        assert!(second.end <= first.start);
     }
 }

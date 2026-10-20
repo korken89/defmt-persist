@@ -24,7 +24,8 @@ critical-section = { version = "1.2", features = ["std"] }
 loom = "0.7.2"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+# Set by `cargo kani` and by the loom CI job.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)"] }
 
 [features]
 default = [
