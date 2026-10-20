@@ -74,12 +74,44 @@ impl Identifier {
     }
 }
 
-/// Bytes from `from` to `to`, going forward in a ring of `len` bytes.
-fn ring_distance(from: usize, to: usize, len: usize) -> usize {
-    if to >= from {
-        to - from
-    } else {
-        len - from + to
+/// Index math for a ring of `len` slots.
+///
+/// The used slots go from a start index up to an end index. One slot always stays free, so
+/// that `start == end` means empty.
+#[derive(Clone, Copy)]
+struct Ring(usize);
+
+impl Ring {
+    /// Returns `true` if `index` is in the ring.
+    fn contains(self, index: usize) -> bool {
+        index < self.0
+    }
+
+    /// Number of used slots from `start` up to `end`.
+    fn used(self, start: usize, end: usize) -> usize {
+        if end >= start {
+            end - start
+        } else {
+            self.0 - start + end
+        }
+    }
+
+    /// Number of slots that can be used after `end` without reaching `start`.
+    fn free(self, start: usize, end: usize) -> usize {
+        self.0 - 1 - self.used(start, end)
+    }
+
+    /// The index `n` slots after `index`.
+    fn add(self, index: usize, n: usize) -> usize {
+        (index + n) % self.0
+    }
+
+    /// The `n` slots after `start`, split where they wrap around.
+    ///
+    /// For `start` in the ring and `n < len`, both ranges are in `0..len`.
+    fn ranges(self, start: usize, n: usize) -> (Range<usize>, Range<usize>) {
+        let before_end = n.min(self.0 - start);
+        (start..start + before_end, 0..n - before_end)
     }
 }
 
@@ -305,7 +337,8 @@ impl RingBuffer {
         // trust it for the safety of our pointer offsets.
         let read = self.read.load(Ordering::Relaxed) as usize;
         let write = self.write.load(Ordering::Relaxed) as usize;
-        match (read < buf_len, write < buf_len) {
+        let ring = Ring(buf_len);
+        match (ring.contains(read), ring.contains(write)) {
             (true, true) => (read, write),
             (true, false) => (read, read),
             (false, true) => (write, write),
@@ -350,16 +383,6 @@ impl RingBuffer {
 }
 
 impl Producer<'_> {
-    /// How much space is left in the buffer?
-    #[inline]
-    fn available(&self, read: usize, write: usize) -> usize {
-        if read > write {
-            read - write - 1
-        } else {
-            self.buf.len() - write - 1 + read
-        }
-    }
-
     /// Appends `data` to the buffer.
     ///
     /// If there is not enough space, the last bytes are silently discarded.
@@ -369,62 +392,27 @@ impl Producer<'_> {
         let read = self.header.read.load(Ordering::Relaxed) as usize;
         // Relaxed: producer owns `write`, no cross-thread synchronization needed.
         let write = self.header.write.load(Ordering::Relaxed) as usize;
-        let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
-        let len = data.len().min(self.available(read, write));
+        let ring = Ring(self.buf.len());
+        let len = data.len().min(ring.free(read, write));
         if len == 0 {
             return;
         }
 
-        // There are `ptr::copy_nonoverlapping` and `pointer::add` calls below.
-        // The common safety arguments are:
-        //
-        // For `copy_nonoverlapping`:
-        // - src valid: sub-slice of `data`, which is valid for reads.
-        // - dst valid: sub-slice of the producer-owned part of `buf`, which is valid for writes.
-        // - aligned: u8 slices have alignment 1.
-        // - nonoverlapping: The caller-provided `data` cannot overlap with the part of `buf` owned
-        //   by the producer, because only the consumer gives slices to external code.
-        //
-        // For `pointer::add`:
-        // - offset in bytes fits in `isize`: the only constructor `RingBuffer::split`
-        //   passes this requirement on to its caller.
-        // - entire memory range inside the same allocation: we stay within `buf`, which is a
-        //   single allocation.
-        //
-        // What remains to show for each use is that src and dst ranges are valid sub-slices of
-        // `data` and the producer-owned part of `buf`, respectively.
-
-        if write + len > self.buf.len() {
-            // Wrapping case: the write crosses the end of the buffer.
-            // This can only happen when write >= read (if write < read, then
-            // available = read - write - 1, and
-            // write + len <= write + read - write - 1 = read - 1 < buf.len(), = contradiction).
-            let pivot = self.buf.len() - write;
+        let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
+        let (range1, range2) = ring.ranges(write, len);
+        let (data1, data2) = data[..len].split_at(range1.len());
+        for (range, data) in [(range1, data1), (range2, data2)] {
             // SAFETY:
-            // - First copy: data[0..pivot] -> buf[write..buf.len()]
-            //   - src: pivot < len <= data.len() (since write + len > buf.len()
-            //     implies len > buf.len() - write = pivot).
-            //   - dst: write < buf.len() by field invariant, and
-            //     write + pivot = buf.len(), so dst is buf[write..buf.len()].
-            unsafe { ptr::copy_nonoverlapping(data.as_ptr(), buf.add(write), pivot) };
-            // SAFETY:
-            // - Second copy: data[pivot..len] -> buf[0..len-pivot]
-            //   - src: pivot..len is in bounds since pivot < len <= data.len().
-            //   - dst: len - pivot <= available - pivot. With write >= read,
-            //     available = buf.len() - write - 1 + read, so
-            //     len - pivot <= buf.len() - write - 1 + read - (buf.len() - write)
-            //     = read - 1 < read. Thus buf[0..len-pivot] does not overlap
-            //     with consumer-owned memory starting at read.
-            unsafe { ptr::copy_nonoverlapping(data.as_ptr().add(pivot), buf, len - pivot) };
-        } else {
-            // Non-wrapping case: the entire write fits before the end.
-            // SAFETY:
-            // - src: data[0..len] is valid since len <= data.len().
-            // - dst: buf[write..write+len]. write < buf.len() by field
-            //   invariant, and write + len <= buf.len() by the else branch
-            //   condition. len <= available ensures we don't write into
-            //   consumer-owned memory.
-            unsafe { ptr::copy_nonoverlapping(data.as_ptr(), buf.add(write), len) };
+            // - src valid: `data` is a sub-slice of the caller's data.
+            // - dst valid: `range` is in `buf`, since `write` is in the ring and
+            //   `len < buf.len()`. It is owned by the producer, since `len` is at
+            //   most the free space after `write`.
+            // - aligned: u8 slices have alignment 1.
+            // - nonoverlapping: The caller-provided `data` cannot overlap with the part of `buf`
+            //   owned by the producer, because only the consumer gives slices to external code.
+            // - `pointer::add` stays in `buf`, and the only constructor `RingBuffer::split`
+            //   requires of its caller that the offset fits in `isize`.
+            unsafe { ptr::copy_nonoverlapping(data.as_ptr(), buf.add(range.start), data.len()) };
         }
 
         // Flush data before updating index. With 32-bit ECC, the index store may flush
@@ -432,10 +420,9 @@ impl Producer<'_> {
         // to uncommitted data.
         self.header.flush_ecc();
 
-        self.header.write.store(
-            (write.wrapping_add(len) % self.buf.len()) as u32,
-            Ordering::Release,
-        );
+        self.header
+            .write
+            .store(ring.add(write, len) as u32, Ordering::Release);
         self.header.flush_ecc();
     }
 }
@@ -454,7 +441,7 @@ impl Consumer<'_> {
     pub(crate) fn len(&self) -> usize {
         let write = self.header.write.load(Ordering::Acquire) as usize;
         let read = self.header.read.load(Ordering::Relaxed) as usize;
-        ring_distance(read, write, self.buf.len())
+        Ring(self.buf.len()).used(read, write)
     }
 
     /// Returns `true` if there is no data available to read.
@@ -479,70 +466,47 @@ impl Consumer<'_> {
         let write = self.header.write.load(Ordering::Acquire) as usize;
         // Relaxed: consumer owns `read`, no cross-thread synchronization needed.
         let read = self.header.read.load(Ordering::Relaxed) as usize;
-        let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
-
-        let (len1, len2) = if write < read {
-            (self.buf.len() - read, write)
-        } else {
-            (write - read, 0)
-        };
-
-        // SAFETY:
-        // For `slice::from_raw_parts`:
-        // - Non-null, valid, aligned: it is a sub-slice of `buf`,
-        //   relying on the invariants on `read` and `write`.
-        // - Properly initialized values: The memory owned by the consumer
-        //   has been initialized by the producer. When recovering the data
-        //   from a previous run, we instead rely on the ability of u8 to
-        //   accept any (fixed) bit pattern. Since the recovery procedure
-        //   produces the value from memory outside the Rust abstract machine,
-        //   the hazards of uninitialized memory should be mitigated.
-        // - Not mutated for the lifetime: only the producer modifies
-        //   `buf`, but the consumer owns this memory until the read pointer
-        //   is updated. The read pointer is only updated in the function
-        //   that drops the slice.
-        // - Total size in bytes < i32::MAX: we stay inside `buf`
-        //   and the only constructor `RingBuffer::split` requires of its caller
-        //   that no in-bounds buffer is too big.
-        //
-        // For `pointer::add`:
-        // - offset in bytes fits in `isize`: buf.len() fits, which is checked
-        //   before constructing a Consumer. write - read fits if write >= read,
-        //   which holds in the cases we use it.
-        // - entire memory range inside the same allocation: read < len, so the
-        //   offset remains in the buffer's allocation.
-        let slice1 = unsafe { slice::from_raw_parts(buf.add(read), len1) };
-        // SAFETY:
-        // For `slice::from_raw_parts`:
-        // - Non-null, valid, aligned: it is a sub-slice of `buf`,
-        //   relying on the invariants on `read` and `write`.
-        // - Properly initialized values: The memory owned by the consumer
-        //   has been initialized by the producer. When recovering the data
-        //   from a previous run, we instead rely on the ability of u8 to
-        //   accept any (fixed) bit pattern. Since the recovery procedure
-        //   produces the value from memory outside the Rust abstract machine,
-        //   the hazards of uninitialized memory should be mitigated.
-        // - Not mutated for the lifetime: only the producer modifies
-        //   `buf`, but the consumer owns this memory until the read pointer
-        //   is updated. The read pointer is only updated in the function
-        //   that drops the slice.
-        // - Total size in bytes < i32::MAX: we stay inside `buf`
-        //   and the only constructor `RingBuffer::split` requires of its caller
-        //   that no in-bounds buffer is too big.
-        //
-        // For `pointer::add`:
-        // - offset in bytes fits in `isize`: buf.len() fits, which is checked
-        //   before constructing a Consumer. write - read fits if write >= read,
-        //   which holds in the cases we use it.
-        // - entire memory range inside the same allocation: read < len, so the
-        //   offset remains in the buffer's allocation.
-        let slice2 = unsafe { slice::from_raw_parts(buf, len2) };
+        let ring = Ring(self.buf.len());
+        let (range1, range2) = ring.ranges(read, ring.used(read, write));
+        // SAFETY: The ranges are the data from `read` up to `write`.
+        let slice1 = unsafe { self.slice(range1) };
+        // SAFETY: As above.
+        let slice2 = unsafe { self.slice(range2) };
         GrantR {
             consumer: self,
             slice1,
             slice2,
             original_read: read,
         }
+    }
+
+    /// The bytes of `buf` in `range`.
+    ///
+    /// # Safety
+    ///
+    /// `range` must be in `buf` and owned by the consumer.
+    unsafe fn slice(&self, range: Range<usize>) -> &[u8] {
+        let buf: *const u8 = self.buf.as_ptr().cast();
+        // SAFETY:
+        // For `slice::from_raw_parts`:
+        // - Non-null, valid, aligned: it is a sub-slice of `buf`, guaranteed by the caller.
+        // - Properly initialized values: The memory owned by the consumer
+        //   has been initialized by the producer. When recovering the data
+        //   from a previous run, we instead rely on the ability of u8 to
+        //   accept any (fixed) bit pattern. Since the recovery procedure
+        //   produces the value from memory outside the Rust abstract machine,
+        //   the hazards of uninitialized memory should be mitigated.
+        // - Not mutated for the lifetime: only the producer modifies
+        //   `buf`, but the consumer owns this memory until the read pointer
+        //   is updated. The read pointer is only updated in the function
+        //   that drops the slice.
+        // - Total size in bytes < i32::MAX: we stay inside `buf`
+        //   and the only constructor `RingBuffer::split` requires of its caller
+        //   that no in-bounds buffer is too big.
+        //
+        // For `pointer::add`: The offset stays in `buf`, and the only constructor
+        // `RingBuffer::split` requires of its caller that it fits in `isize`.
+        unsafe { slice::from_raw_parts(buf.add(range.start), range.len()) }
     }
 
     #[cfg(feature = "async-await")]
@@ -593,16 +557,11 @@ impl<'a, 'c> GrantR<'a, 'c> {
         let used = used.min(self.slice1.len() + self.slice2.len());
         // Non-atomic read-modify-write is ok here because there can
         // never be more than one active GrantR at a time.
-        let read = self.original_read;
-        let new_read = if read + used < self.consumer.buf.len() {
-            read + used
-        } else {
-            used - self.slice1.len()
-        };
+        let read = Ring(self.consumer.buf.len()).add(self.original_read, used);
         self.consumer
             .header
             .read
-            .store(new_read as u32, Ordering::Release);
+            .store(read as u32, Ordering::Release);
         self.consumer.header.flush_ecc();
     }
 
@@ -676,6 +635,24 @@ mod test {
             r.release_all();
         }
         grants
+    }
+
+    #[test]
+    fn ring_math() {
+        for len in 1..6 {
+            let ring = Ring(len);
+            for start in 0..len {
+                for end in 0..len {
+                    let used = ring.used(start, end);
+                    assert_eq!(used + ring.free(start, end), len - 1);
+                    assert_eq!(ring.add(start, used), end);
+                    let (range1, range2) = ring.ranges(start, used);
+                    let indexes: Vec<_> = range1.chain(range2).collect();
+                    let expected: Vec<_> = (0..used).map(|n| (start + n) % len).collect();
+                    assert_eq!(indexes, expected);
+                }
+            }
+        }
     }
 
     #[test]
