@@ -49,7 +49,7 @@ pub struct RingBuffer {
     /// Writing a single byte to this field flushes the ECC write cache.
     /// An unaligned write to a different SRAM word forces the cache to commit.
     #[cfg(feature = "ecc")]
-    _ecc_flush: UnsafeCell<u64>,
+    _ecc_flush: EccFlush,
 }
 
 /// The firmwares that wrote the buffer contents, oldest first.
@@ -79,6 +79,11 @@ struct Segment {
     /// Where the data starts.
     start: AtomicU32,
 }
+
+/// A byte in an SRAM word of its own.
+#[cfg(feature = "ecc")]
+#[repr(C, align(8))]
+struct EccFlush(core::sync::atomic::AtomicU8);
 
 /// Identifier for the firmware that generated a log. It's up
 /// to the implementer to use as many bytes as they deem necessary.
@@ -220,7 +225,7 @@ impl RingBuffer {
             read: AtomicU32::new(read),
             write: AtomicU32::new(write),
             #[cfg(feature = "ecc")]
-            _ecc_flush: UnsafeCell::new(0),
+            _ecc_flush: EccFlush(core::sync::atomic::AtomicU8::new(0)),
         }
     }
 
@@ -231,17 +236,10 @@ impl RingBuffer {
     fn flush_ecc(&self) {
         #[cfg(feature = "ecc")]
         {
-            // Ensure previous writes are emitted before the volatile write.
+            // Ensure previous writes are emitted before the flush.
             compiler_fence(Ordering::SeqCst);
-            // SAFETY: Writing a single byte to our own `UnsafeCell` field is safe.
-            // This unaligned access to a different SRAM word flushes the ECC cache.
-            // Concurrent writes from Producer and Consumer are safe because:
-            // - Single-byte writes are atomic on all supported platforms.
-            // - The value written is always 0; we don't care about the result.
-            unsafe {
-                let ptr: *mut u8 = self._ecc_flush.get().cast();
-                ptr.write_volatile(0);
-            }
+            // Atomic, since the Producer and the Consumer both flush.
+            self._ecc_flush.0.store(0, Ordering::Relaxed);
         }
     }
     /// Creates a `RingBuffer` or recovers previous state if available.
@@ -543,8 +541,9 @@ impl Producer<'_> {
     /// If there is not enough space, the last bytes are silently discarded.
     #[inline]
     pub fn write(&mut self, data: &[u8]) {
-        // Relaxed: stale `read` is safe (underestimates available space).
-        let read = self.header.read.load(Ordering::Relaxed) as usize;
+        // Acquire: synchronizes with consumer's Release store, so its reads of the freed
+        // space happen before we overwrite it. A stale `read` underestimates the space.
+        let read = self.header.read.load(Ordering::Acquire) as usize;
         // Relaxed: producer owns `write`, no cross-thread synchronization needed.
         let write = self.header.write.load(Ordering::Relaxed) as usize;
         let ring = Ring(self.buf.len());

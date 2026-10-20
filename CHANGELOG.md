@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Fixed
 
 - doc comment for `Consumer::read`
+- Data races between writing and reading logs
 
 ### Changed
 
