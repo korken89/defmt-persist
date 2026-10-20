@@ -17,7 +17,7 @@ use core::{
 /// On MCUs with 32-bit or 64-bit ECC-protected RAM (e.g., STM32H7/H5), writes are cached
 /// until a full ECC word is written. A reset before the cache is flushed can lose data.
 ///
-/// Enable the `ecc` feature to add an `_ecc_flush` field. After each write operation,
+/// Enable the `ecc` feature to add an `ecc_flush` field. After each write operation,
 /// a single byte is written to this field, which flushes the ECC write cache by performing
 /// an unaligned access to a different SRAM word.
 ///
@@ -49,7 +49,7 @@ pub struct RingBuffer {
     /// Writing a single byte to this field flushes the ECC write cache.
     /// An unaligned write to a different SRAM word forces the cache to commit.
     #[cfg(feature = "ecc")]
-    _ecc_flush: UnsafeCell<u64>,
+    ecc_flush: EccFlush,
 }
 
 /// The firmwares that wrote the buffer contents, oldest first.
@@ -78,6 +78,29 @@ struct Segment {
     identifier: Identifier,
     /// Where the data starts.
     start: AtomicU32,
+}
+
+/// An SRAM word of its own, with a byte for each side so they never write the same byte.
+#[cfg(feature = "ecc")]
+#[derive(Default)]
+// Not `repr(C)`, which hides unused fields from the dead code lint.
+#[repr(align(8))]
+struct EccFlush {
+    producer: UnsafeCell<u8>,
+    /// Also used during recovery.
+    consumer: UnsafeCell<u8>,
+}
+
+// The buffer follows the `RingBuffer`, so its layout must not depend on the compiler.
+#[cfg(feature = "ecc")]
+const _: () = assert!(size_of::<EccFlush>() == 8);
+
+/// The side that accesses the buffer.
+#[derive(Clone, Copy)]
+enum Side {
+    Producer,
+    /// Also used during recovery.
+    Consumer,
 }
 
 /// Identifier for the firmware that generated a log. It's up
@@ -226,7 +249,7 @@ impl RingBuffer {
             read: AtomicU32::new(read),
             write: AtomicU32::new(write),
             #[cfg(feature = "ecc")]
-            _ecc_flush: UnsafeCell::new(0),
+            ecc_flush: EccFlush::default(),
         }
     }
 
@@ -234,20 +257,18 @@ impl RingBuffer {
     ///
     /// No-op when `ecc` feature is disabled.
     #[inline]
-    fn flush_ecc(&self) {
+    #[cfg_attr(not(feature = "ecc"), expect(unused_variables))]
+    fn flush_ecc(&self, side: Side) {
         #[cfg(feature = "ecc")]
         {
+            let byte = match side {
+                Side::Producer => &self.ecc_flush.producer,
+                Side::Consumer => &self.ecc_flush.consumer,
+            };
             // Ensure previous writes are emitted before the volatile write.
             compiler_fence(Ordering::SeqCst);
-            // SAFETY: Writing a single byte to our own `UnsafeCell` field is safe.
-            // This unaligned access to a different SRAM word flushes the ECC cache.
-            // Concurrent writes from Producer and Consumer are safe because:
-            // - Single-byte writes are atomic on all supported platforms.
-            // - The value written is always 0; we don't care about the result.
-            unsafe {
-                let ptr: *mut u8 = self._ecc_flush.get().cast();
-                ptr.write_volatile(0);
-            }
+            // SAFETY: Only `side` writes this byte, and nothing reads it.
+            unsafe { byte.get().write_volatile(0) };
         }
     }
     /// Creates a `RingBuffer` or recovers previous state if available.
@@ -331,7 +352,7 @@ impl RingBuffer {
         // SAFETY:
         // - Alignment is guaranteed by the caller.
         // - Size is guaranteed by the caller.
-        // - All fields (`u128`, `AtomicU32`, `UnsafeCell<u64>`, `[UnsafeCell<MaybeUninit<u8>>, X]`)
+        // - All fields (`u128`, `AtomicU32`, `UnsafeCell<u8>`, `[UnsafeCell<MaybeUninit<u8>>, X]`)
         //   are valid for any bit pattern, so interpreting the raw memory as this
         //   type and buffer is sound. As the memory is initialized outside the Rust abstract
         //   machine (of the running program), we consider the caveats of non-fixed
@@ -466,12 +487,14 @@ impl RingBuffer {
         // `read` must reach memory before `first`, also across a reset.
         self.flush();
         self.segments.first.store(second as u8, Ordering::Relaxed);
-        self.flush_ecc();
+        self.flush_ecc(Side::Consumer);
     }
 
     /// Orders all previous writes before the following ones, also across a reset.
+    ///
+    /// Flushes as the consumer, so the producer must not call it.
     fn flush(&self) {
-        self.flush_ecc();
+        self.flush_ecc(Side::Consumer);
         fence(Ordering::SeqCst);
     }
 
@@ -553,8 +576,9 @@ impl Producer<'_> {
     /// If there is not enough space, the last bytes are silently discarded.
     #[inline]
     pub fn write(&mut self, data: &[u8]) {
-        // Relaxed: stale `read` is safe (underestimates available space).
-        let read = self.header.read.load(Ordering::Relaxed) as usize;
+        // Acquire: synchronizes with consumer's Release store, so its reads of the freed
+        // space happen before we overwrite it. A stale `read` underestimates the space.
+        let read = self.header.read.load(Ordering::Acquire) as usize;
         // Relaxed: producer owns `write`, no cross-thread synchronization needed.
         let write = self.header.write.load(Ordering::Relaxed) as usize;
         let ring = Ring(self.buf.len());
@@ -583,12 +607,12 @@ impl Producer<'_> {
         // Flush data before updating index. With 32-bit ECC, the index store may flush
         // immediately while data is still cached. This ensures the index never points
         // to uncommitted data.
-        self.header.flush_ecc();
+        self.header.flush_ecc(Side::Producer);
 
         self.header
             .write
             .store(ring.add(write, len) as u32, Ordering::Release);
-        self.header.flush_ecc();
+        self.header.flush_ecc(Side::Producer);
     }
 }
 
@@ -732,7 +756,7 @@ pub struct GrantR<'a, 'c> {
 // - Only one GrantR can exist at a time (Consumer::read takes &mut self)
 // - The slice is a regular &[u8] pointing to consumer-owned memory that the producer
 //   won't modify until release() updates the read pointer
-// - release() only performs atomic stores to header.read (and `_ecc_flush` for ECC)
+// - release() only stores to header.read (and its own `ecc_flush` byte for ECC)
 // - The underlying UnsafeCell in Consumer::buf is not directly accessed through GrantR;
 //   the slice was materialized in Consumer::read before GrantR was created
 unsafe impl Send for GrantR<'_, '_> {}
@@ -751,7 +775,7 @@ impl<'a, 'c> GrantR<'a, 'c> {
             .header
             .read
             .store(read as u32, Ordering::Release);
-        self.consumer.header.flush_ecc();
+        self.consumer.header.flush_ecc(Side::Consumer);
     }
 
     /// Finish the read, marking all bytes as used.

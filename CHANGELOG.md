@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- Data races between writing and reading logs
+
 ## v0.2.0
 
 ### Added
