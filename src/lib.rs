@@ -14,6 +14,7 @@ pub use ring_buffer::{Consumer, GrantR, Identifier};
 pub(crate) mod atomic_waker;
 pub(crate) mod logger;
 mod ring_buffer;
+mod sync;
 
 /// Error returned by [`init`] when initialization fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]

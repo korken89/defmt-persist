@@ -20,6 +20,12 @@ cortex-m-semihosting = { version = "0.5", optional = true }
 [dev-dependencies]
 critical-section = { version = "1.2", features = ["std"] }
 
+[target.'cfg(loom)'.dependencies]
+loom = "0.7.2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+
 [features]
 default = [
     "rtt",
