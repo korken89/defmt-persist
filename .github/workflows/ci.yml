@@ -87,6 +87,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-features
 
+  loom:
+    name: Loom
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg loom
+      LOOM_LOCATION: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --lib --release loom
+      - run: cargo test --lib --release --no-default-features loom
+
   miri:
     name: Miri (${{ matrix.features || 'no-default-features' }})
     runs-on: ubuntu-latest

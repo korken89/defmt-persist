@@ -1,12 +1,8 @@
 //! A single-producer, single-consumer (SPSC) lock-free queue.
 
-use core::{
-    cell::UnsafeCell,
-    mem::MaybeUninit,
-    ops::Range,
-    ptr, slice,
-    sync::atomic::{AtomicU8, AtomicU32, Ordering, compiler_fence, fence},
-};
+use core::{cell::UnsafeCell, mem::MaybeUninit, ops::Range, ptr, slice, sync::atomic::Ordering};
+
+use crate::sync::{AtomicU8, AtomicU32, fence};
 
 /// A single-producer, single-consumer (SPSC) lock-free queue storing up to `len-1` bytes.
 /// `len` is defined by the leftover size of the region after the [`RingBuffer`] has taken its
@@ -50,6 +46,9 @@ pub struct RingBuffer {
     /// An unaligned write to a different SRAM word forces the cache to commit.
     #[cfg(feature = "ecc")]
     _ecc_flush: EccFlush,
+    /// One cell per byte of the buffer, for loom to track the accesses to it.
+    #[cfg(loom)]
+    loom_bytes: [loom::cell::UnsafeCell<()>; LOOM_BUF_LEN],
 }
 
 /// The firmwares that wrote the buffer contents, oldest first.
@@ -80,10 +79,14 @@ struct Segment {
     start: AtomicU32,
 }
 
+/// The length of the buffer in the loom model.
+#[cfg(loom)]
+const LOOM_BUF_LEN: usize = 4;
+
 /// A byte in an SRAM word of its own.
 #[cfg(feature = "ecc")]
 #[repr(C, align(8))]
-struct EccFlush(core::sync::atomic::AtomicU8);
+struct EccFlush(AtomicU8);
 
 /// Identifier for the firmware that generated a log. It's up
 /// to the implementer to use as many bytes as they deem necessary.
@@ -225,7 +228,9 @@ impl RingBuffer {
             read: AtomicU32::new(read),
             write: AtomicU32::new(write),
             #[cfg(feature = "ecc")]
-            _ecc_flush: EccFlush(core::sync::atomic::AtomicU8::new(0)),
+            _ecc_flush: EccFlush(AtomicU8::new(0)),
+            #[cfg(loom)]
+            loom_bytes: core::array::from_fn(|_| loom::cell::UnsafeCell::new(())),
         }
     }
 
@@ -237,7 +242,7 @@ impl RingBuffer {
         #[cfg(feature = "ecc")]
         {
             // Ensure previous writes are emitted before the flush.
-            compiler_fence(Ordering::SeqCst);
+            crate::sync::compiler_fence(Ordering::SeqCst);
             // Atomic, since the Producer and the Consumer both flush.
             self._ecc_flush.0.store(0, Ordering::Relaxed);
         }
@@ -463,6 +468,18 @@ impl RingBuffer {
         fence(Ordering::SeqCst);
     }
 
+    /// The loom cells of `len` bytes of the buffer from `start`.
+    #[cfg(loom)]
+    fn loom_cells(
+        &self,
+        start: usize,
+        len: usize,
+        buf_len: usize,
+    ) -> impl Iterator<Item = &loom::cell::UnsafeCell<()>> {
+        assert_eq!(buf_len, LOOM_BUF_LEN);
+        (start..start + len).map(move |index| &self.loom_bytes[index % buf_len])
+    }
+
     /// # Safety
     ///
     /// - `memory.start` must be aligned to `align_of::<RingBuffer>()`.
@@ -552,6 +569,11 @@ impl Producer<'_> {
             return;
         }
 
+        #[cfg(loom)]
+        self.header
+            .loom_cells(write, len, self.buf.len())
+            .for_each(|cell| cell.with_mut(|_| ()));
+
         let buf: *mut u8 = self.buf.as_ptr().cast_mut().cast();
         let (range1, range2) = ring.ranges(write, len);
         let (data1, data2) = data[..len].split_at(range1.len());
@@ -627,6 +649,11 @@ impl<'c> Consumer<'c> {
         let slice1 = unsafe { self.slice(range1) };
         // SAFETY: As above.
         let slice2 = unsafe { self.slice(range2) };
+        // The bytes of the grant may be read from here on.
+        #[cfg(loom)]
+        header
+            .loom_cells(read, slice1.len() + slice2.len(), self.buf.len())
+            .for_each(|cell| cell.with(|_| ()));
         GrantR {
             consumer: self,
             slice1,
@@ -736,6 +763,16 @@ impl<'a, 'c> GrantR<'a, 'c> {
         // Non-atomic read-modify-write is ok here because there can
         // never be more than one active GrantR at a time.
         let read = Ring(self.consumer.buf.len()).add(self.original_read, used);
+        // The bytes of the grant may have been read up to here.
+        #[cfg(loom)]
+        self.consumer
+            .header
+            .loom_cells(
+                self.original_read,
+                self.slice1.len() + self.slice2.len(),
+                self.consumer.buf.len(),
+            )
+            .for_each(|cell| cell.with(|_| ()));
         self.consumer
             .header
             .read
@@ -766,7 +803,7 @@ impl<'a, 'c> GrantR<'a, 'c> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod test {
 
     use super::*;
@@ -1434,5 +1471,86 @@ mod test {
         assert_eq!(m.peek(), None);
         let (_, mut c) = m.boot(1);
         assert_eq!(drain(&mut c), []);
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_test {
+    use super::*;
+
+    extern crate std;
+    use loom::{sync::Arc, thread};
+    use std::{sync::atomic::AtomicBool, vec::Vec};
+
+    /// A ring buffer shared by a producer and a consumer thread.
+    struct Shared {
+        header: RingBuffer,
+        buf: [UnsafeCell<MaybeUninit<u8>>; LOOM_BUF_LEN],
+    }
+
+    // SAFETY: The threads only access it through one Producer and one Consumer.
+    unsafe impl Sync for Shared {}
+
+    /// Like [`RingBuffer::split`], but for threads that share the buffer.
+    impl Shared {
+        fn producer(&self) -> Producer<'_> {
+            Producer {
+                header: &self.header,
+                buf: &self.buf,
+            }
+        }
+
+        fn consumer(&self) -> Consumer<'_> {
+            Consumer {
+                header: &self.header,
+                buf: &self.buf,
+            }
+        }
+    }
+
+    /// Reads and releases everything that is available.
+    fn read_all(c: &mut Consumer<'_>, read: &mut Vec<u8>) {
+        let grant = c.read();
+        let (buf1, buf2) = grant.bufs();
+        read.extend(buf1.iter().chain(buf2));
+        grant.release_all();
+    }
+
+    #[test]
+    fn producer_reuses_released_space() {
+        let wrapped = std::sync::Arc::new(AtomicBool::new(false));
+        let explored = wrapped.clone();
+        loom::model(move || {
+            let shared = Arc::new(Shared {
+                header: RingBuffer::new(0, 0),
+                buf: core::array::from_fn(|_| UnsafeCell::new(MaybeUninit::uninit())),
+            });
+            let producer = {
+                let shared = shared.clone();
+                thread::spawn(move || {
+                    let mut p = shared.producer();
+                    p.write(&[1, 2, 3]);
+                    // Wraps around into the space the consumer may have released.
+                    p.write(&[4, 5]);
+                })
+            };
+
+            let mut c = shared.consumer();
+            let mut read = Vec::new();
+            // With a single read here, loom never explores the producer writing into
+            // released space, which the assertion after the model checks.
+            for _ in 0..2 {
+                read_all(&mut c, &mut read);
+            }
+            producer.join().unwrap();
+            read_all(&mut c, &mut read);
+
+            // The second write is discarded if no space was released yet.
+            assert!(read == [1, 2, 3] || read == [1, 2, 3, 4, 5]);
+            if read.len() == 5 {
+                explored.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(wrapped.load(Ordering::Relaxed));
     }
 }
