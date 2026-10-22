@@ -47,9 +47,10 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// time a different firmware logs, so a bootloader and an application that both log start two
 /// per boot. When more are needed, the unread data of the oldest segment is dropped.
 ///
-/// A common approach is to hash the firmware flash content using a simple hash function
-/// like FNV-1a. Use a hash with enough output bits to avoid collisions between firmware
-/// versions.
+/// The GNU build ID of the firmware is a good identifier, see the "Firmware identifier" section
+/// of the crate docs. Hashing the flash content also works, but costs time at boot and can miss
+/// changes that only touch the `.defmt` string table. Use a hash with enough output bits to avoid
+/// collisions between firmware versions.
 ///
 /// # Errors
 ///
