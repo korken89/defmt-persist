@@ -39,8 +39,7 @@ async fn reader_task(consumer: &mut Consumer<'static>) {
 
 #[entry]
 fn main() -> ! {
-    let metadata = defmt_persist::init(Default::default()).unwrap();
-    let mut consumer = metadata.consumer;
+    let mut consumer = defmt_persist::init(Default::default()).unwrap();
 
     block_on(join(writer_task(), reader_task(&mut consumer)));
 
